@@ -36,5 +36,4 @@ settings.development.py
 *.pyc
 .idea
 venv
-
 app.log
