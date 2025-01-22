@@ -240,7 +240,11 @@ def resolve_file(filename, collection, type, scale):
         return path.join(relpath, scaled_name)
 
     if not path.exists(basepath):
-        makedirs(basepath)
+        try:
+            makedirs(basepath, exist_ok=True)
+        except FileExistsError:
+            pass
+
 
     orig_dir = path.join(settings.BASE_DIR, get_rel_path(request.query.coll, thumb_p=False, storename=storename))
     orig_path = path.join(orig_dir, storename)
