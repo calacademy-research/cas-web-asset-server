@@ -1,5 +1,9 @@
 server_jenkins_config.sh
 attachments/
+nginx.conf
+botblocker-settings/blacklist-user-agents.conf
+botblocker-settings/whitelist-domains.conf
+botblocker-settings/whitelist-ips.conf
 **/tax_dump.sql
 **/run_picdb.sh
 **/dummy_cleaner.py
