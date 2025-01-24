@@ -17,7 +17,7 @@ from client_utilities import build_url
 from client_utilities import generate_token
 from client_utilities import get_timestamp
 from collection_definitions import COLLECTION_DIRS
-from image_db import TIME_FORMAT_NO_OFFESET
+from image_db import TIME_FORMAT_NO_OFFSET
 import hashlib
 from metadata_tools.EXIF_constants import EXIFConstants
 
@@ -488,7 +488,7 @@ def test_get_redacted_image_by_original_filename():
     assert data[-1]['original_path'] == TEST_PATH
     assert data[-1]['notes'] == TEST_NOTES
     assert data[-1]['redacted']
-    assert pytz.utc.localize(datetime.strptime(data[-1]['datetime'], TIME_FORMAT_NO_OFFESET)) == TEST_DATE
+    assert pytz.utc.localize(datetime.strptime(data[-1]['datetime'], TIME_FORMAT_NO_OFFSET)) == TEST_DATE
 
     r = delete_attach_loc()
     assert r.status_code == 200
@@ -514,7 +514,7 @@ def test_get_non_redacted_image_by_original_filename():
     assert data[-1]['original_path'] == TEST_PATH
     assert data[-1]['notes'] == TEST_NOTES
     assert data[-1]['redacted'] == False
-    assert pytz.utc.localize(datetime.strptime(data[-1]['datetime'], TIME_FORMAT_NO_OFFESET)) == TEST_DATE
+    assert pytz.utc.localize(datetime.strptime(data[-1]['datetime'], TIME_FORMAT_NO_OFFSET)) == TEST_DATE
 
     r = delete_attach_loc()
     assert r.status_code == 200

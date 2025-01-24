@@ -34,9 +34,7 @@ from bottle import (
 
 BaseRequest.MEMFILE_MAX = 300 * 1024 * 1024
 
-def get_image_db():
-    image_db = ImageDb()
-    return image_db
+image_db = ImageDb()
 
 def log(msg):
     logging.debug(msg)
@@ -271,7 +269,6 @@ def static(path):
     if not settings.ALLOW_STATIC_FILE_ACCESS:
         abort(404)
     filename = path.split('/')[-1]
-    image_db=get_image_db()
     records = image_db.get_image_record_by_internal_filename(filename)
     if len(records) < 1:
         log(f"Static record not found: {request.query.filename}")
@@ -319,7 +316,6 @@ def getfileref():
 def fileget():
     """Returns the file data of the file indicated by the query parameters."""
     log(f"fileget {request.query.filename}")
-    image_db=get_image_db()
     records = image_db.get_image_record_by_internal_filename(request.query.filename)
     log(f"Fileget complete")
     if len(records) < 1:
@@ -370,7 +366,6 @@ def fileupload():
     """Accept original file uploads and store them in the proper
     attachment subdirectory.
     """
-    image_db = get_image_db()
     start_save = time.time()
     log(f"Post request for fileupload...")
     thumb_p = (request.forms['type'] == "T")
@@ -458,7 +453,6 @@ def filedelete():
     if the original file does not exist. Any associated thumbnails will
     also be deleted.
     """
-    image_db = get_image_db()
     storename = request.forms.filename
 
     basepath = path.join(settings.BASE_DIR, get_rel_path(request.forms.coll, thumb_p=False, storename=storename))
@@ -496,7 +490,6 @@ def json_datetime_handler(x):
 @app.route('/getImageRecord')
 @require_token('file_string', always=True)
 def get_image_record():
-    image_db = get_image_db()
     query_params = request.query
 
     search_type = query_params.get('search_type', default='filename')
@@ -615,10 +608,9 @@ def main_page():
 
 if __name__ == '__main__':
     from bottle import run
-    image_db = get_image_db()
     log("Starting up....")
-    image_db = ImageDb()
-    while image_db.connect() is not True:
+    # Ensure the pool is initialized
+    if image_db.connection_pool:
         sleep(5)
         log("Retrying db connection....")
     image_db.create_tables()
