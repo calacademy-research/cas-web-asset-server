@@ -1,10 +1,11 @@
 import mysql.connector
-from mysql.connector import errorcode, pooling
+from mysql.connector import errorcode
 from retrying import retry
-
 import settings
 from datetime import datetime
 import logging
+import os
+import re
 import configparser
 
 TIME_FORMAT_NO_OFFSET = "%Y-%m-%d %H:%M:%S"
@@ -17,10 +18,11 @@ class ImageDb:
 
     def init_pool_size(self):
         """sets pool size by getting # of workers and threads from uwsgi"""
+        config_path = os.path.join(os.path.dirname(__file__), "uwsgi.ini")
         config = configparser.ConfigParser()
-        config.read("./uwsgi.ini")
-        workers = int(config.get("uwsgi", "workers", fallback=4))  # Default to 1 worker
-        threads = int(config.get("uwsgi", "threads", fallback=8))  # Default to 1 thread
+        config.read(f"{config_path}")
+        workers = int(re.sub(r"[^\d]", "", config.get("uwsgi", "workers", fallback="4")))
+        threads = int(re.sub(r"[^\d]", "", config.get("uwsgi", "threads", fallback="8")))
         return workers * threads
 
 

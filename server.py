@@ -609,7 +609,8 @@ def main_page():
 if __name__ == '__main__':
     from bottle import run
     log("Starting up....")
-    while image_db.connect() is not True:
+    # Ensure the pool is initialized
+    if image_db.connection_pool:
         sleep(5)
         log("Retrying db connection....")
     image_db.create_tables()
