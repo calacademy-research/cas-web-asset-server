@@ -1,360 +1,308 @@
 import mysql.connector
 from mysql.connector import errorcode
 from retrying import retry
+
 import settings
 from datetime import datetime
 import logging
-import os
-import re
-import configparser
 
-TIME_FORMAT_NO_OFFSET = "%Y-%m-%d %H:%M:%S"
-TIME_FORMAT = TIME_FORMAT_NO_OFFSET + "%z"
+TIME_FORMAT_NO_OFFESET = "%Y-%m-%d %H:%M:%S"
+TIME_FORMAT = TIME_FORMAT_NO_OFFESET + "%z"
 
-class ImageDb:
+
+class ImageDb():
     def __init__(self):
-        self.pool_size = self.init_pool_size()
-        self.connection_pool = None
-
-    def init_pool_size(self):
-        """sets pool size by getting # of workers and threads from uwsgi"""
-        config_path = os.path.join(os.path.dirname(__file__), "uwsgi.ini")
-        config = configparser.ConfigParser()
-        config.read(f"{config_path}")
-        workers = int(re.sub(r"[^\d]", "", config.get("uwsgi", "workers", fallback="4")))
-        threads = int(re.sub(r"[^\d]", "", config.get("uwsgi", "threads", fallback="8")))
-        return workers * threads
-
+        self.cnx = None
 
     def log(self, msg):
         if settings.DEBUG_APP:
             print(msg)
 
-    def initialize_pool(self):
-        """
-        Initialize the connection pool lazily if it hasn't been created yet.
-        """
-        if not self.connection_pool:
-            self.log("Initializing connection pool...")
-            try:
-                self.connection_pool = mysql.connector.pooling.MySQLConnectionPool(
-                    pool_name="image_db_pool",
-                    pool_size= self.pool_size,  # Adjust pool size as needed
-                    user=settings.SQL_USER,
-                    password=settings.SQL_PASSWORD,
-                    host=settings.SQL_HOST,
-                    port=settings.SQL_PORT,
-                    database=settings.SQL_DATABASE,
-                )
-                self.log("Connection pool initialized.")
-            except mysql.connector.Error as err:
-                self.log(f"Failed to initialize connection pool: {err}")
-                raise
+    def retry_if_operational_error(exception):
+        pass
 
-    @retry(retry_on_exception=lambda e: isinstance(e, mysql.connector.Error), stop_max_attempt_number=3, wait_exponential_multiplier=1000)
+
+    @retry(retry_on_exception=lambda e: isinstance(e, mysql.connector.OperationalError), stop_max_attempt_number=3,
+           wait_exponential_multiplier=2)
     def get_cursor(self):
-        """
-        Get a connection from the pool and create a cursor.
-        """
         try:
-            self.initialize_pool()  # Ensure the pool is initialized
-            connection = self.connection_pool.get_connection()
-            return connection.cursor(buffered=True), connection
-        except mysql.connector.Error as e:
-            self.log(f"Error getting cursor: {e}")
-            raise
+            if self.cnx is None:
+                self.connect()
+            return self.cnx.cursor(buffered=True)
+        except mysql.connector.OperationalError as e:
+            logging.warning("Failed to connect, resetting DB connection and sleeping")
+            self.reset_connection()
+            raise e
 
-    def close_connection(self, connection):
-        """
-        Return a connection to the pool.
-        """
-        if connection:
+    def reset_connection(self):
+        self.log(f"Resetting connection to {settings.SQL_HOST}")
+
+        if self.cnx:
             try:
-                connection.close()
-                self.log("Connection returned to the pool.")
-            except mysql.connector.Error as e:
-                self.log(f"Error closing connection: {e}")
+                self.cnx.close()
+            except Exception:
+                pass
+        self.connect()
+
+    def connect(self):
+
+        try:
+            self.cnx = mysql.connector.connect(user=settings.SQL_USER,
+                                               password=settings.SQL_PASSWORD,
+                                               host=settings.SQL_HOST,
+                                               port=settings.SQL_PORT,
+                                               database=settings.SQL_DATABASE)
+
+        except mysql.connector.Error as err:
+            if err.errno == errorcode.ER_ACCESS_DENIED_ERROR:
+                self.log(
+                    f"SQL: Access denied to image server database. host: {settings.SQL_HOST} user: {settings.SQL_USER}")
+            elif err.errno == errorcode.ER_BAD_DB_ERROR:
+                self.log("Database does not exist")
+            else:
+                self.log(err)
+            return False
+        except Exception as ex:
+            self.log(f"Unknown error:{ex}")
+            return False
+        self.log("Db connected")
+
+        return True
 
     def create_tables(self):
-        """
-        Create the required database tables if they do not exist.
-        """
-        TABLES = {
-            'images': (
-                "CREATE TABLE IF NOT EXISTS `images` ("
-                "  id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,"
-                "  original_filename VARCHAR(2000),"
-                "  url VARCHAR(500),"
-                "  universal_url VARCHAR(500),"
-                "  original_path VARCHAR(2000),"
-                "  redacted BOOLEAN,"
-                "  internal_filename VARCHAR(500),"
-                "  notes VARCHAR(8192),"
-                "  datetime DATETIME,"
-                "  collection VARCHAR(50),"
-                "  orig_md5 CHAR(32)"
-                ") ENGINE=InnoDB"
-            )
-        }
+        TABLES = {}
 
-        cursor, connection = None, None
-        try:
-            cursor, connection = self.get_cursor()
-            for table_name, table_description in TABLES.items():
-                try:
-                    self.log(f"Creating table {table_name}...")
-                    cursor.execute(table_description)
-                    self.log(f"Table {table_name} creation: OK")
-                except mysql.connector.Error as err:
-                    if err.errno == errorcode.ER_TABLE_EXISTS_ERROR:
-                        self.log(f"Table {table_name} already exists.")
-                    else:
-                        self.log(f"Error creating table {table_name}: {err}")
-        finally:
-            if cursor:
-                cursor.close()
-            if connection:
-                self.close_connection(connection)
+        TABLES['images'] = (
+            "CREATE TABLE if not exists `images`.`images` ("
+            "   id int NOT NULL AUTO_INCREMENT primary key,"
+            "  `original_filename` varchar(2000),"
+            "  `url` varchar(500),"
+            "  `universal_url` varchar(500),"
+            "  `original_path` varchar(2000),"
+            "  `redacted` BOOLEAN,"
+            "  `internal_filename` varchar(500),"
+            "  `notes` varchar(8192),"
+            "  `datetime` datetime,"
+            "  `collection` varchar(50)"
+            ") ENGINE=InnoDB")
 
-    def create_image_record(self, original_filename, url, internal_filename, collection, original_path, notes, redacted, datetime_record, original_image_md5):
-        cursor, connection = None, None
-        try:
-            cursor, connection = self.get_cursor()
+        cursor = self.get_cursor()
 
-            # Build the INSERT SQL query
-            add_image = (f"""INSERT INTO images
-                            (original_filename, url, universal_url, internal_filename, collection, original_path, notes, redacted, datetime, orig_md5)
-                            VALUES (
-                            "{original_filename or 'NULL'}",
-                            "{url}",
-                            NULL,
-                            "{internal_filename}",
-                            "{collection}",
-                            "{original_path}",
-                            "{notes}",
-                            "{int(redacted)}",
-                            "{datetime_record.strftime(TIME_FORMAT_NO_OFFSET)}",
-                            "{original_image_md5 or 'NULL'}")""")
+        for table_name in TABLES:
+            table_description = TABLES[table_name]
+            try:
+                self.log(f"Creating table {table_name}...")
+                self.log(f"Sql: {TABLES[table_name]}")
+                cursor.execute(table_description)
+            except mysql.connector.Error as err:
+                if err.errno == errorcode.ER_TABLE_EXISTS_ERROR:
+                    self.log("already exists.")
+                else:
+                    self.log(err.msg)
+            else:
+                self.log("OK")
 
-            self.log(f"Inserting image record. SQL: {add_image}")
-            cursor.execute(add_image)
-            connection.commit()
-        except mysql.connector.Error as e:
-            self.log(f"Error inserting image record: {e}")
-            raise
-        finally:
-            if cursor:
-                cursor.close()
-            if connection:
-                self.close_connection(connection)
+        cursor.close()
+        cursor = self.get_cursor()
+
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'images' AND column_name = 'orig_md5'")
+        column_exists = cursor.fetchone()[0]
+
+        if not column_exists:
+            # Add the "orig_md5" column to the "images" table
+            cursor.execute("ALTER TABLE images ADD COLUMN orig_md5 CHAR(32)")
+
+        cursor.close()
+
+    def create_image_record(self,
+                            original_filename,
+                            url,
+                            internal_filename,
+                            collection,
+                            original_path,
+                            notes,
+                            redacted,
+                            datetime_record,
+                            original_image_md5
+                            ):
+
+        cursor = self.get_cursor()
+        if original_filename is None:
+            original_filename = "NULL"
+        if original_image_md5 is None:
+            original_image_md5 = "NULL"
+
+        add_image = (f"""INSERT INTO images
+                        (original_filename, url, universal_url, internal_filename, collection,original_path,notes,redacted,datetime,orig_md5)
+                        values (
+                        "{original_filename}", 
+                        "{url}", 
+                        NULL, 
+                        "{internal_filename}", 
+                        "{collection}", 
+                        "{original_path}", 
+                        "{notes}", 
+                        "{int(redacted)}", 
+                        "{datetime_record.strftime(TIME_FORMAT_NO_OFFESET)}",
+                        "{original_image_md5}")""")
+
+        self.log(f"Inserting imageInserting image record. SQL: {add_image}")
+        cursor.execute(add_image)
+        self.cnx.commit()
+        cursor.close()
 
     @retry(retry_on_exception=lambda e: isinstance(e, Exception), stop_max_attempt_number=3)
     def update_redacted(self, internal_filename, is_redacted):
-        cursor, connection = None, None
-        try:
-            sql = f"""
-            UPDATE images SET redacted = {is_redacted} WHERE internal_filename = '{internal_filename}'
-            """
-            logging.debug(f"update redacted: {sql}")
-            cursor, connection = self.get_cursor()
-            cursor.execute(sql)
-            connection.commit()
-        except mysql.connector.Error as e:
-            self.log(f"Error updating redacted: {e}")
-            raise
-        finally:
-            if cursor:
-                cursor.close()
-            if connection:
-                self.close_connection(connection)
+        sql = f"""
+        update images set redacted = {is_redacted} where internal_filename = '{internal_filename}' 
+        """
+
+        logging.debug(f"update redacted: {sql}")
+        cursor = self.get_cursor()
+        cursor.execute(sql)
+        self.cnx.commit()
+        cursor.close()
 
     def get_record(self, where_clause):
-        cursor, connection = None, None
-        try:
-            query = f"""SELECT id, original_filename, url, universal_url, internal_filename, collection, original_path, notes, redacted, datetime, orig_md5
-                FROM images 
-                {where_clause}"""
 
-            cursor, connection = self.get_cursor()
-            cursor.execute(query)
-            record_list = []
-            for (
-                    id, original_filename, url, universal_url, internal_filename, collection, original_path, notes,
-                    redacted, datetime_record, orig_md5) in cursor:
-                record_list.append({'id': id,
-                                    'original_filename': original_filename,
-                                    'url': url,
-                                    'universal_url': universal_url,
-                                    'internal_filename': internal_filename,
-                                    'collection': collection,
-                                    'original_path': original_path,
-                                    'notes': notes,
-                                    'redacted': redacted,
-                                    'datetime': datetime.strptime(datetime_record, TIME_FORMAT),
-                                    'orig_md5': orig_md5
-                                    })
+        cursor = self.get_cursor()
 
-            return record_list
-        except mysql.connector.Error as e:
-            self.log(f"Error fetching records: {e}")
-            raise
-        finally:
-            if cursor:
-                cursor.close()
-            if connection:
-                self.close_connection(connection)
+        query = f"""SELECT id, original_filename, url, universal_url, internal_filename, collection,original_path, notes, redacted, datetime, orig_md5
+           FROM images 
+           {where_clause}"""
+
+        cursor.execute(query)
+        record_list = []
+        for (
+                id, original_filename, url, universal_url, internal_filename, collection, original_path, notes,
+                redacted, datetime_record, orig_md5) in cursor:
+            record_list.append({'id': id,
+                                'original_filename': original_filename,
+                                'url': url,
+                                'universal_url': universal_url,
+                                'internal_filename': internal_filename,
+                                'collection': collection,
+                                'original_path': original_path,
+                                'notes': notes,
+                                'redacted': redacted,
+                                'datetime': datetime.strptime(datetime_record, TIME_FORMAT),
+                                'orig_md5': orig_md5
+                                })
+
+        cursor.close()
+        return record_list
 
     def get_image_record_by_internal_filename(self, internal_filename):
-        cursor, connection = None, None
-        try:
-            query = f"""SELECT id, original_filename, url, universal_url, internal_filename, collection, original_path, notes, redacted, datetime, orig_md5
-               FROM images 
-               WHERE internal_filename = '{internal_filename}'"""
+        cursor = self.get_cursor()
 
-            cursor, connection = self.get_cursor()
-            cursor.execute(query)
-            record_list = []
-            for (id,
-                 original_filename,
-                 url,
-                 universal_url,
-                 internal_filename,
-                 collection,
-                 original_path,
-                 notes,
-                 redacted,
-                 datetime_record,
-                 orig_md5) in cursor:
-                record_list.append({'id': id,
-                                    'original_filename': original_filename,
-                                    'url': url,
-                                    'universal_url': universal_url,
-                                    'internal_filename': internal_filename,
-                                    'collection': collection,
-                                    'original_path': original_path,
-                                    'notes': notes,
-                                    'redacted': redacted,
-                                    'datetime': datetime_record.strftime(TIME_FORMAT),
-                                    'orig_md5': orig_md5
-                                    })
+        query = f"""SELECT id, original_filename, url, universal_url, internal_filename, collection,original_path, notes, redacted, datetime, orig_md5
+           FROM images 
+           WHERE internal_filename = '{internal_filename}'"""
 
-            return record_list
-        except mysql.connector.Error as e:
-            self.log(f"Error fetching record by internal filename: {e}")
-            raise
-        finally:
-            if cursor:
-                cursor.close()
-            if connection:
-                self.close_connection(connection)
+        cursor.execute(query)
+        record_list = []
+        for (id,
+             original_filename,
+             url,
+             universal_url,
+             internal_filename,
+             collection,
+             original_path,
+             notes,
+             redacted,
+             datetime_record,
+             orig_md5) in cursor:
+            record_list.append({'id': id,
+                                'original_filename': original_filename,
+                                'url': url,
+                                'universal_url': universal_url,
+                                'internal_filename': internal_filename,
+                                'collection': collection,
+                                'original_path': original_path,
+                                'notes': notes,
+                                'redacted': redacted,
+                                'datetime': datetime_record.strftime(TIME_FORMAT),
+                                'orig_md5': orig_md5
+                                })
+
+        cursor.close()
+        return record_list
 
     def get_image_record_by_pattern(self, pattern, column, exact, collection):
-        cursor, connection = None, None
-        try:
-            if exact:
-                query = f"""SELECT id, original_filename, url, universal_url, internal_filename, collection, original_path, notes, redacted, datetime, orig_md5
-                FROM images 
-                WHERE {column} = '{pattern}'"""
-            else:
-                query = f"""SELECT id, original_filename, url, universal_url, internal_filename, collection, original_path, notes, redacted, datetime, orig_md5
-                FROM images 
-                WHERE {column} LIKE '{pattern}'"""
-            if collection is not None:
-                query += f""" AND collection = '{collection}'"""
-            self.log(f"Query get_image_record_by_{column}: {query}")
+        cursor = self.get_cursor()
+        if exact:
+            query = f"""SELECT id, original_filename, url, universal_url, internal_filename, collection,original_path, notes, redacted, datetime, orig_md5
+            FROM images 
+            WHERE {column} = '{pattern}'"""
+        else:
+            query = f"""SELECT id, original_filename, url, universal_url, internal_filename, collection,original_path, notes, redacted, datetime, orig_md5
+            FROM images 
+            WHERE {column} LIKE '{pattern}'"""
+        if collection is not None:
+            query += f""" AND collection = '{collection}'"""
+        self.log(f"Query get_image_record_by_{column}: {query}")
 
-            cursor, connection = self.get_cursor()
-            cursor.execute(query)
-            record_list = []
-            for (
-                    id, original_filename, url, universal_url, internal_filename, collection, original_path, notes,
-                    redacted, datetime_record, orig_md5) in cursor:
-                record_list.append({'id': id,
-                                    'original_filename': original_filename,
-                                    'url': url,
-                                    'universal_url': universal_url,
-                                    'internal_filename': internal_filename,
-                                    'collection': collection,
-                                    'original_path': original_path,
-                                    'notes': notes,
-                                    'redacted': redacted,
-                                    'datetime': datetime_record,
-                                    'orig_md5': orig_md5
-                                    })
-                self.log(f"Found at least one record: {record_list[-1]}")
+        cursor.execute(query)
+        record_list = []
+        for (
+                id, original_filename, url, universal_url, internal_filename, collection, original_path, notes,
+                redacted, datetime_record, orig_md5) in cursor:
+            record_list.append({'id': id,
+                                'original_filename': original_filename,
+                                'url': url,
+                                'universal_url': universal_url,
+                                'internal_filename': internal_filename,
+                                'collection': collection,
+                                'original_path': original_path,
+                                'notes': notes,
+                                'redacted': redacted,
+                                'datetime': datetime_record,
+                                'orig_md5': orig_md5
+                                })
+            self.log(f"Found at least one record: {record_list[-1]}")
 
-            return record_list
-        except mysql.connector.Error as e:
-            self.log(f"Error fetching records by pattern: {e}")
-            raise
-        finally:
-            if cursor:
-                cursor.close()
-            if connection:
-                self.close_connection(connection)
+        cursor.close()
+        return record_list
 
     def get_image_record_by_original_path(self, original_path, exact, collection):
-        return self.get_image_record_by_pattern(original_path, 'original_path', exact, collection)
-
+        record_list = self.get_image_record_by_pattern(original_path, 'original_path', exact, collection)
+        return record_list
 
     def get_image_record_by_original_filename(self, original_filename, exact, collection):
-        return self.get_image_record_by_pattern(original_filename, 'original_filename', exact, collection)
-
+        record_list = self.get_image_record_by_pattern(original_filename, 'original_filename', exact, collection)
+        return record_list
 
     def get_image_record_by_original_image_md5(self, md5, collection):
-        return self.get_image_record_by_pattern(md5, 'orig_md5', True, collection)
+        record_list = self.get_image_record_by_pattern(md5, 'orig_md5', True, collection)
+        return record_list
 
     def delete_image_record(self, internal_filename):
-        cursor, connection = None, None
-        try:
-            delete_image = f"""DELETE FROM images WHERE internal_filename='{internal_filename}'"""
-            self.log(f"Deleting image record. SQL: {delete_image}")
+        cursor = self.get_cursor()
 
-            cursor, connection = self.get_cursor()
-            cursor.execute(delete_image)
-            connection.commit()
-        except mysql.connector.Error as e:
-            self.log(f"Error deleting image record: {e}")
-            raise
-        finally:
-            if cursor:
-                cursor.close()
-            if connection:
-                self.close_connection(connection)
+        delete_image = (f"""delete from images where internal_filename='{internal_filename}' """)
+
+        self.log(f"deleting image record. SQL: {delete_image}")
+        cursor.execute(delete_image)
+        self.cnx.commit()
+        cursor.close()
 
     def execute(self, sql):
-        cursor, connection = None, None
-        try:
-            cursor, connection = self.get_cursor()
-            logging.debug(f"SQL: {sql}")
-            cursor.execute(sql)
-            connection.commit()
-        except mysql.connector.Error as e:
-            self.log(f"Error executing query: {e}")
-            raise
-        finally:
-            if cursor:
-                cursor.close()
-            if connection:
-                self.close_connection(connection)
+        cursor = self.get_cursor()
+        logging.debug(f"SQL: {sql}")
+        cursor.execute(sql)
+        self.cnx.commit()
+        cursor.close()
 
     def get_collection_list(self):
-        cursor, connection = None, None
-        try:
-            query = f"""SELECT collection FROM collection"""
-            cursor, connection = self.get_cursor()
-            cursor.execute(query)
-            collection_list = [collection[0] for collection in cursor.fetchall()]
-            return collection_list
-        except mysql.connector.Error as e:
-            self.log(f"Error fetching collection list: {e}")
-            raise
-        finally:
-            if cursor:
-                cursor.close()
-            if connection:
-                self.close_connection(connection)
+        cursor = self.get_cursor()
 
+        query = f"""select collection from collection"""
+
+        cursor.execute(query)
+        collection_list = []
+        for (collection) in cursor:
+            collection_list.append(collection)
     #
     #  not used 4/10/23 - left for referenece for now
     #
