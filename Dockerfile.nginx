@@ -21,7 +21,7 @@ RUN wget https://raw.githubusercontent.com/mitchellkrogza/nginx-ultimate-bad-bot
     -O /usr/local/sbin/install-ngxblocker \
  && chmod +x /usr/local/sbin/install-ngxblocker
 
-# Run install-ngxblocker, telling it to place files in conf.d and bots.d
+# Run install-ngxblocker and update botlist, telling it to place files in conf.d and bots.d
 RUN /usr/local/sbin/install-ngxblocker -x -c /etc/nginx/conf.d -b /etc/nginx/bots.d
 
 # Download and install the setup/update scripts
@@ -31,6 +31,9 @@ RUN wget https://raw.githubusercontent.com/mitchellkrogza/nginx-ultimate-bad-bot
     -O /usr/local/sbin/update-ngxblocker \
  && chmod +x /usr/local/sbin/setup-ngxblocker \
  && chmod +x /usr/local/sbin/update-ngxblocker
+
+# run any updates to botblocker
+RUN /usr/local/sbin/update-ngxblocker -c /etc/nginx/conf.d -b /etc/nginx/bots.d
 
 # adding custom whitelists to botblocker
 COPY botblocker-settings/whitelist-domains.conf botblocker-settings/whitelist-ips.conf botblocker-settings/blacklist-user-agents.conf /etc/nginx/bots.d/

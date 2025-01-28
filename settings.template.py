@@ -54,6 +54,8 @@ SERVER_NAME = f"{HOST}"
 SERVER_PORT = PORT
 SERVER_PROTOCOL = "https"
 print(f"Starting with host: {HOST}")
+
+# Port the development test server should listen on used when using non 80/443 port for testing purposes.
 DEVELOPMENT_PORT = PORT
 
 # set to TRUE when using port other than 80 on http or 443 on https, as requests defaults to 80/443 in the url
