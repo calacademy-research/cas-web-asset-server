@@ -6,8 +6,8 @@ import settings
 from datetime import datetime
 import logging
 
-TIME_FORMAT_NO_OFFESET = "%Y-%m-%d %H:%M:%S"
-TIME_FORMAT = TIME_FORMAT_NO_OFFESET + "%z"
+TIME_FORMAT_NO_OFFSET = "%Y-%m-%d %H:%M:%S"
+TIME_FORMAT = TIME_FORMAT_NO_OFFSET + "%z"
 
 
 class ImageDb():
@@ -144,7 +144,7 @@ class ImageDb():
                         "{original_path}", 
                         "{notes}", 
                         "{int(redacted)}", 
-                        "{datetime_record.strftime(TIME_FORMAT_NO_OFFESET)}",
+                        "{datetime_record.strftime(TIME_FORMAT_NO_OFFSET)}",
                         "{original_image_md5}")""")
 
         self.log(f"Inserting imageInserting image record. SQL: {add_image}")

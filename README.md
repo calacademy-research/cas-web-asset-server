@@ -1,36 +1,34 @@
-Web Asset Server
+# Web Asset Server
 =========
 
-This is a sample attachment server implementation for Specify. This implementation is targeted at Ubuntu flavors, but will work with minor modifications on other Linux systems. It is not expected to work without extensive adaptation on Windows systems.
+This is a sample attachment server implementation for Specify. This implementation is targeted at Ubuntu distributions but will work with minor modifications on other Linux systems. It is not expected to work without extensive adaptation on Windows systems.
 
-The Specify Collections Consortium is funded by its member
-institutions. The Consortium web site is:
-http://www.specifysoftware.org
+The Specify Collections Consortium is funded by its member institutions. The Consortium website is:  
+[http://www.specifysoftware.org](http://www.specifysoftware.org)
 
-Web Asset Server Copyright © 2021 Specify Collections Consortium. Specify
-comes with ABSOLUTELY NO WARRANTY.  This is free software licensed
-under GNU General Public License 2 (GPL2).
+**Web Asset Server Copyright © 2021 Specify Collections Consortium.**  
+Specify comes with ABSOLUTELY NO WARRANTY. This is free software licensed under the GNU General Public License 2 (GPL2).
 
     Specify Collections Consortium
     Biodiversity Institute
     University of Kansas
     1345 Jayhawk Blvd.
     Lawrence, KS 66045 USA
-    
+
 ## Table of Contents
     
-   * [Web Asset Server](#web-asset-server)
+   * [Web Asset Server](#-web-asset-server)
      * [Table of Contents](#table-of-contents)
    * [Features](#features)
    * [Default Rate Restrictions](#default-rate-restrictions)
-   * [Deployment](#Deployment)
-   * [Detailed Docker Installation Instructions](#detailed-docker-installation-instructions)
-     * [Cloning Web Asset Server source repository](#cloning-web-asset-server-source-repository)
-     * [Setting up Docker Compose .yml](#setting-up-docker-compose-yml)
-     * [Setting up settings.py](#setting-up-settingspy)
-     * [Setting up Nginx](#setting-up-nginx)
-     * [Setting up botblocker(optional)](#setting-up-botblockeroptional)
-   * [Running server.py locally via python without nginx](#running-serverpy-locally-via-python-without-nginx)
+   * [Deployment](#deployment)
+   * [Detailed Docker Installation Instructions](#-detailed-docker-installation-instructions)
+     * [Cloning Web Asset Server Source Repository](#cloning-web-asset-server-source-repository)
+     * [Configuring Docker Compose .yml](#configuring-docker-compose-yml)
+     * [Configuring settings.py](#configuring-settingspy)
+     * [Configuring Nginx](#configuring-nginxconf)
+     * [Configuring BotBlocker (Optional)](#configuring-botblockeroptional)
+   * [Running server.py locally via Python without Nginx](#running-serverpy-locally-via-python-without-nginx)
    * [HTTPS](#https)
    * [Specify Settings](#specify-settings)
      *[Specify6 Settings](#specify-6-settings)
@@ -38,42 +36,41 @@ under GNU General Public License 2 (GPL2).
    * [Compatibility with older versions of Python](#compatibility-with-older-versions-of-python)
 
 
-# Features:
+## Features:
 
-* Internal mysql database tracks all imports and allows querying to map a URL 
-back to an original filename
-  
-* Subdirectories created based on the first four letters of the internal filename; prevents very large 
-  directory listings
-  
-* Import client with example specify integration. Import directory trees with files that match a regular 
-  expression, descend recursively
-  
-* Prevents duplicate filename import in a given collection/namespace
+* Internal MySQL database tracks all imports and allows querying to map a URL back to an original filename.
 
-* Supports redacted images
+* Subdirectories are created based on the first four characters of the internal filename to prevent very large directory listings.
 
-* Docker integration with nginx for performance and security
+* Import client with an example Specify integration. Import directory trees with files that match a regular expression, descending recursively.
 
-* rate restriction options for external IPS to prevent server overload.
+* Prevents duplicate filename imports in a given collection/namespace.
 
-* optional comprehensive botblocker.
+* Supports redacted images.
 
-* sub-module for editing exif image metadata.
+* Docker integration with Nginx for performance and security.
 
-# Default Rate Restrictions
+* Rate restriction options for external IPs to prevent server overload.
 
-* For external users and IP addresses the current limit is set at 10r/m with burst set at = 2.
-* No rate limits for internal users on networks with addresses like 24 bit block: 10.0.0.0 , 
-  20 bit block: 172.16.0.0, 16 bit block: 192.168.0.0
+* Optional comprehensive bot blocker.
+
+* Submodule for editing EXIF image metadata.
 
 
-# Deployment:
+## Default Rate Restrictions
+
+* For external users and IP addresses, the current limit is set to 10 requests per minute, with a burst limit of 2.
+* No rate limits are imposed on internal users on networks with addresses in the following ranges:
+  - 24-bit block: 10.0.0.0
+  - 20-bit block: 172.16.0.0
+  - 16-bit block: 192.168.0.0
+
+## Deployment:
 Copy `docker-compose.template.yml` and `settings.template.py` to their 
 respective filenames without 'template' and adjust settings accordingly. Note that you can run the
 system without using docker; simply launch the database with the `start_images_development_db.sh` script
 and then run the server with "python3 server.py". This is recommended for initial setup and testing.
-Note that for testing, you'll need to use a non-privlidged port such as 8080. 
+Note that for testing, you'll need to use a non-privileged port such as 8080. 
 
 Once testing is complete, stop the docker container running the database, and type `docker-compose up -d`
 to start the full server.
@@ -82,8 +79,9 @@ It is important that the working directory is set to the path containing `server
 so that *bottle.py* can find the template files. See [“TEMPLATE NOT FOUND” IN MOD_WSGI/MOD_PYTHON](http://bottlepy.org/docs/dev/faq.html#template-not-found-in-mod-wsgi-mod-python).
 
 # Detailed Docker Installation Instructions
-The below instructions are for a docker installation, instructions for running directly without docker are given at the bottom.
---If running directly via python only the step [Setting up settings.py](#Setting up settings.py) needs to be completed.
+---
+The following instructions from [Cloning Web Asset Server Source Repository](#cloning-web-asset-server-source-repository) to [Final docker-compose and setup](#final-docker-compose-and-setup) are for a Docker installation. Instructions for running the server directly without Docker are provided at the bottom.  
+If running directly via Python, only the step [Configuring `settings.py`](#configuring-settingspy) needs to be completed after running `git clone git@github.com:calacademy-research/cas-web-asset-server.git`, then skip to [Running server.py locally via python without nginx](#running-serverpy-locally-via-python-without-nginx):.
 
 
 ## Cloning Web Asset Server source repository
@@ -93,11 +91,11 @@ Clone this repository.
 git clone git@github.com:calacademy-research/cas-web-asset-server.git
 ```
 
-## Setting up Docker Compose .yml
+## Configuring Docker Compose .yml
 
 Docker in the preferred installation method for Web Asset Server.
 
-Example `docker-compose.template.yml` is provided:
+An example `docker-compose.template.yml` is provided:
 
 ```yaml
 services:
@@ -154,11 +152,11 @@ services:
       - 3306
 
 ```
-For production use, it's recommended to also add an nginx web server between
-the web asset server and the outside world. Example
+For production use, it is recommended to also add a nginx web server between
+the web asset server and the outside world. An example nginx can be found at
 [nginx.conf](https://github.com/calacademy-research/cas-web-asset-server/blob/master/nginx.template.conf)
-and [docker-compose.yml](https://github.com/calacademy-research/cas-web-asset-server/blob/master/docker-compose.template.yml).
-For development/evaluation, web asset server can be exposed directly. To do so,
+as well as an example docker-compose.yml for a nginx, image-server and image database at [docker-compose.yml](https://github.com/calacademy-research/cas-web-asset-server/blob/master/docker-compose.template.yml).
+For development/evaluation, the web asset server can be exposed directly. To do so,
 add the following lines to your `docker-compose.yml` right after the `asset-server:` line, 
 and comment out the nginx service:
 
@@ -167,7 +165,7 @@ and comment out the nginx service:
       - "80:80"
       - "443:443"
 ```
-## Setting up settings.py
+## Configuring settings.py
 Example settings.py at [settings.py](https://github.com/calacademy-research/cas-web-asset-server/blob/master/settings.template.py)
 1. Copy settings.template.py to settings.py, 
 2. Confirm your server HOST , PORT & SERVER_PROTOCOL match your server settings in docker-compose.yml. 
@@ -175,7 +173,7 @@ Example settings.py at [settings.py](https://github.com/calacademy-research/cas-
 4. Confirm your BASE_DIR, THUMB_DIR, ORIG_DIR , match your attachments folder setup.
 5. Confirm other settings are to your preferences.
 
-## Setting up Nginx:
+## Configuring Nginx.conf:
 A nginx is recommended for controlling traffic to your server , a sample template is [nginx.template.conf](https://github.com/calacademy-research/cas-web-asset-server/blob/master/nginx.template.conf)
 Copy `nginx.template.conf` to its respective filename and remove 'template'. 
 Edit the below nginx map variables to your preferences:
@@ -187,10 +185,10 @@ Edit the below nginx map variables to your preferences:
 (Optional) For running nginx locally on http:
 1. comment out the top server block which redirects port 80 with a 301 code.
 2. comment out the lines `ssl_certificate /etc/ssl/certs/name_of_ssl_cert.pem;` and  `ssl_certificate_key /etc/ssl/private/name_of_ssl_cert.key;`.
-3. replace the line `listen 443 ssl;` with `listen 80;`, replacing port 80 with any preffered port.
+3. replace the line `listen 443 ssl;` with `listen 80;`, replacing port 80 with any preferred port.
 
-## Setting up botblocker(optional)
-Botblocker is a comprehensive add-on that can be used to dynamically block harmful bots from accessing your server . [Github](git@github.com:mitchellkrogza/nginx-ultimate-bad-bot-blocker.git)
+## Configuring botblocker(optional)
+Botblocker is a comprehensive add-on that can be used to dynamically block harmful bots from accessing your server. [Github](git@github.com:mitchellkrogza/nginx-ultimate-bad-bot-blocker.git)
 1. Copy the templates in `botblocker-settings` for `blacklist-user-agents`, `whitelist-domains.conf` and `whitelist-ips.conf`.
 2. Commented out examples are provided in each template. Setup desired whitelist exceptions for allowed ip ranges, user agents and/or domain names.
 3. uncomment or add the lines `include /etc/nginx/conf.d/globalblacklist.conf;` and `include /etc/nginx/conf.d/botblocker-nginx-settings.conf;` inside your nginx http brackets.
@@ -226,18 +224,19 @@ COPY botblocker-settings/whitelist-domains.conf botblocker-settings/whitelist-ip
 RUN echo "00 22 * * * /usr/local/sbin/update-ngxblocker -e youremail@example.org" >> /etc/crontab
 ```
 
-## final docker-compose and setup
--- The image-server container runs on ubuntu 24
+## Final docker-compose and setup
+-- The image-server container runs on an ubuntu 24 docker image.
 -- all setup and dependencies are installed automatically in the Dockerfiles. `Dockerfile.nginx` [here](https://github.com/calacademy-research/cas-web-asset-server/blob/master/Dockerfile.nginx) & `Dockerfile.server` [here](cas-web-asset-server).
 -- If not using botblocker comment out all lines from the lines 19-42 containing the botblocker install steps
 1. Run docker compose.
 ```shell
 docker compose up -d
 ```
-2. (optional) deploy any sql image db backup by copying your backup .sql file to the mounted folder data/ via `cp image_db_backup.sql data/` and then logging into mysql and running `source /var/lib/mysql/image_db_backup.sql`
+2. (Optional) deploy any sql image db backup by copying your backup .sql file to the mounted folder data/ via `cp image_db_backup.sql data/` and then logging into mysql and running `source /var/lib/mysql/image_db_backup.sql`
 
+---
 
-# Running server.py locally via python without nginx:
+## Running server.py locally via python without nginx:
 
 -- Copy and setup settings.py. See [Setting up settings.py](#Setting up settings.py)
 The dependencies are:
@@ -246,7 +245,7 @@ The dependencies are:
 1. *Docker* used to deploy the image database.
 1. *ImageMagick* for thumbnailing.
 1. *ExifTool* for editing exif metadata via the command line.
-1. Metadatatools submodule at https://github.com/calacademy-research/metadata_tools.git for editing Exif metadata.
+1. *Metadatatools* submodule at https://github.com/calacademy-research/metadata_tools.git for python methods to edit exif metadata.
 
 To install dependencies
 the following commands work on Ubuntu:
@@ -259,7 +258,7 @@ apt-get update && apt-get install -y \
     gcc-aarch64-linux-gnu uwsgi uwsgi-plugin-python3 python3.12-venv\
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# activate the metadatatools submodule   
+# activate the Metadatatools submodule   
 git submodule update --init --recursive
 # create venv
 python3 -m venv venv
@@ -274,6 +273,8 @@ python3 server.py
 ## lastly to check that your setup is working
 pytest tests/
 ```
+
+---
 
 # HTTPS
 The easiest way to add HTTPS support, which is necessary to use the asset server with a Specify 7 server that is using HTTPS, is to place the asset server behind a reverse proxy such as Nginx. This also makes it possible to forego *authbind* and run the asset server on an unprivileged port. The proxy must be configured to rewrite the `web_asset_store.xml` resource to adjust the links therein. An example configuration can be found in [this gist](https://gist.github.com/benanhalt/d43a3fa7bf04edfc0bcdc11c612b2278).
@@ -334,7 +335,7 @@ For both the `specify7` and `specify7-worker` sections, you need to make sure th
       - SP7_DEBUG=false
 ```
 
-If you are using a  local installation, in the `settings.py` file, you need to make sure that:
+If you are using a local installation, in the `settings.py` file, you need to make sure that:
 
 - `attachment.key` = `WEB_ATTACHMENT_KEY`
 - `attachment.url` = `WEB_ATTACHMENT_URL`
@@ -359,4 +360,4 @@ WEB_ATTACHMENT_KEY = None
   * convert to universal URLS (n2t.net) and database same (images.universal_urls). Our id=42754. http://n2t.
     net/e/n2t_apidoc.html
   * Support invisible watermarks and add API for same
-  * support updating all cached resized images, not just thumbanmils. 
+  * support updating all cached resized images, not just thumbnails. 
