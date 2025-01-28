@@ -1,5 +1,6 @@
 server_jenkins_config.sh
 attachments/
+start_images_development_db_test.sh
 nginx.conf
 botblocker-settings/blacklist-user-agents.conf
 botblocker-settings/whitelist-domains.conf
