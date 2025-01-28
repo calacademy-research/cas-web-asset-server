@@ -19,7 +19,7 @@ Specify comes with ABSOLUTELY NO WARRANTY. This is free software licensed under 
     
    * [Web Asset Server](#-web-asset-server)
      * [Table of Contents](#table-of-contents)
-   * [Features](#features)
+   * [New Features](#new-features)
    * [Default Rate Restrictions](#default-rate-restrictions)
    * [Deployment](#deployment)
    * [Detailed Docker Installation Instructions](#-detailed-docker-installation-instructions)
@@ -36,25 +36,34 @@ Specify comes with ABSOLUTELY NO WARRANTY. This is free software licensed under 
    * [Compatibility with older versions of Python](#compatibility-with-older-versions-of-python)
 
 
-## Features:
+## New Features:
 
-* Internal MySQL database tracks all imports and allows querying to map a URL back to an original filename.
+**Full Docker Integration**
+    - A full docker network ecosystem image database, server and nginx containers defined in .yml file.
+    - Improved dockerfiles for nginx and image-server for easy setup.
 
-* Subdirectories are created based on the first four characters of the internal filename to prevent very large directory listings.
+**Integrated Metadata Management**
+   - REST support for reading and writing image metadata. Includes a submodule MetadataTools for editing EXIF metadata.
 
-* Import client with an example Specify integration. Import directory trees with files that match a regular expression, descending recursively.
+**Image Asset Organization**
+   - Internal MySQL database tracks all imports and allows querying to map a URL back to an original filename.
+   - Tiered directory structure based on the first four characters of the MD5 hash to prevent large directory listings.  
+     For example, `236586c8a808832c794a525642f5cc42.jpg` is stored in `23/65/236586c8a808832c794a525642f5cc42.jpg`.
+   - Prevents duplicate filename imports in a given collection or namespace.
 
-* Prevents duplicate filename imports in a given collection/namespace.
+**Redacted Image Support**
+   - Supports redacted images with controlled access. Only authenticated users can view redacted images.
 
-* Supports redacted images.
+**Performance and Security Enhancements**
+   - Docker integration with Nginx for optimized performance and enhanced security.
+   - Multithreading support with associated Nginx configuration.
+   - Nginx rate restriction and CORS policy options for external IPs and Domains.
+   - Optional bot and scanner blocker (e.g., Ultimate Bot Blocker).
 
-* Docker integration with Nginx for performance and security.
+**Continuous Integration and Testing**
+   - Jenkins CI support for automated testing and deployment.
+   - Comprehensive test suite to ensure reliability across all features.
 
-* Rate restriction options for external IPs to prevent server overload.
-
-* Optional comprehensive bot blocker.
-
-* Submodule for editing EXIF image metadata.
 
 
 ## Default Rate Restrictions
@@ -273,7 +282,7 @@ python3 server.py
 ## lastly to check that your setup is working
 pytest tests/
 ```
-
+--The command `python server_ipup.py` automatically updates the host, .yml and settings ip addresses between uses when running server.py locally via python.
 ---
 
 # HTTPS
