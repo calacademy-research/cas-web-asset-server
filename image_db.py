@@ -133,34 +133,38 @@ class ImageDb():
         if original_image_md5 is None:
             original_image_md5 = "NULL"
 
-        add_image = (f"""INSERT INTO images
-                        (original_filename, url, universal_url, internal_filename, collection,original_path,notes,redacted,datetime,orig_md5)
-                        values (
-                        "{original_filename}", 
-                        "{url}", 
-                        NULL, 
-                        "{internal_filename}", 
-                        "{collection}", 
-                        "{original_path}", 
-                        "{notes}", 
-                        "{int(redacted)}", 
-                        "{datetime_record.strftime(TIME_FORMAT_NO_OFFSET)}",
-                        "{original_image_md5}")""")
+        add_image = """INSERT INTO images
+                        (original_filename, url, universal_url, internal_filename, collection, original_path, 
+                         notes, redacted, `datetime`, orig_md5)
+                        VALUES (%s, %s, NULL, %s, %s, %s, %s, %s, %s, %s)"""
+
+        # parameters
+        params = (
+            original_filename if original_filename is not None else None,
+            url if url is not None else None,
+            internal_filename if internal_filename is not None else None,
+            collection if collection is not None else None,
+            original_path if original_path is not None else None,
+            notes if notes is not None else None,
+            int(redacted),  # Ensure redacted is an integer
+            datetime_record.strftime(TIME_FORMAT_NO_OFFSET) if datetime_record is not None else None,
+            original_image_md5 if original_image_md5 is not None else None
+        )
 
         self.log(f"Inserting imageInserting image record. SQL: {add_image}")
-        cursor.execute(add_image)
+        cursor.execute(add_image, params)
         self.cnx.commit()
         cursor.close()
 
     @retry(retry_on_exception=lambda e: isinstance(e, Exception), stop_max_attempt_number=3)
     def update_redacted(self, internal_filename, is_redacted):
         sql = f"""
-        update images set redacted = {is_redacted} where internal_filename = '{internal_filename}' 
+        update images set redacted = {is_redacted} where internal_filename = %s 
         """
 
         logging.debug(f"update redacted: {sql}")
         cursor = self.get_cursor()
-        cursor.execute(sql)
+        cursor.execute(sql, (internal_filename,))
         self.cnx.commit()
         cursor.close()
 
@@ -168,7 +172,7 @@ class ImageDb():
 
         cursor = self.get_cursor()
 
-        query = f"""SELECT id, original_filename, url, universal_url, internal_filename, collection,original_path, notes, redacted, datetime, orig_md5
+        query = f"""SELECT id, original_filename, url, universal_url, internal_filename, collection,original_path, notes, redacted, `datetime`, orig_md5
            FROM images 
            {where_clause}"""
 
@@ -196,11 +200,12 @@ class ImageDb():
     def get_image_record_by_internal_filename(self, internal_filename):
         cursor = self.get_cursor()
 
-        query = f"""SELECT id, original_filename, url, universal_url, internal_filename, collection,original_path, notes, redacted, datetime, orig_md5
+        query = f"""SELECT id, original_filename, url, universal_url, internal_filename, collection,original_path, notes, redacted, `datetime`, orig_md5
            FROM images 
-           WHERE internal_filename = '{internal_filename}'"""
+           WHERE internal_filename = %s"""
 
-        cursor.execute(query)
+        cursor.execute(query, (internal_filename,))
+
         record_list = []
         for (id,
              original_filename,
@@ -232,22 +237,29 @@ class ImageDb():
     def get_image_record_by_pattern(self, pattern, column, exact, collection):
         cursor = self.get_cursor()
         if exact:
-            query = f"""SELECT id, original_filename, url, universal_url, internal_filename, collection,original_path, notes, redacted, datetime, orig_md5
-            FROM images 
-            WHERE {column} = '{pattern}'"""
+            query = f"""SELECT id, original_filename, url, universal_url, internal_filename, collection, original_path, 
+                               notes, redacted, `datetime`, orig_md5
+                        FROM images 
+                        WHERE {column} = %s"""
+            params = [pattern]
         else:
-            query = f"""SELECT id, original_filename, url, universal_url, internal_filename, collection,original_path, notes, redacted, datetime, orig_md5
-            FROM images 
-            WHERE {column} LIKE '{pattern}'"""
-        if collection is not None:
-            query += f""" AND collection = '{collection}'"""
-        self.log(f"Query get_image_record_by_{column}: {query}")
+            query = f"""SELECT id, original_filename, url, universal_url, internal_filename, collection, original_path, 
+                               notes, redacted, `datetime`, orig_md5
+                        FROM images 
+                        WHERE {column} LIKE %s"""
+            params = [f"%{pattern}%"]
 
-        cursor.execute(query)
+        if collection is not None:
+            query += " AND collection = %s"
+            params.append(collection)
+
+        self.log(f"Executing query: {query} with params: {params}")
+
+        cursor.execute(query, params)
+
         record_list = []
-        for (
-                id, original_filename, url, universal_url, internal_filename, collection, original_path, notes,
-                redacted, datetime_record, orig_md5) in cursor:
+        for (id, original_filename, url, universal_url, internal_filename, collection, original_path, notes,
+             redacted, datetime_record, orig_md5) in cursor:
             record_list.append({'id': id,
                                 'original_filename': original_filename,
                                 'url': url,
@@ -280,10 +292,10 @@ class ImageDb():
     def delete_image_record(self, internal_filename):
         cursor = self.get_cursor()
 
-        delete_image = (f"""delete from images where internal_filename='{internal_filename}' """)
+        delete_image = (f"""delete from images where internal_filename= %s """)
 
         self.log(f"deleting image record. SQL: {delete_image}")
-        cursor.execute(delete_image)
+        cursor.execute(delete_image, (internal_filename,))
         self.cnx.commit()
         cursor.close()
 
