@@ -1,0 +1,20 @@
+[mysqld]
+# Connection Handling
+max_connections = 2000
+table_open_cache = 6000          # Scaled based on RAM & workload
+thread_cache_size = 256          # Prevents excessive thread creation
+
+# InnoDB Memory Optimization
+innodb_buffer_pool_size = 4G
+innodb_redo_log_capacity = 1G
+innodb_buffer_pool_instances = 8 # One per CPU core for better parallelism
+innodb_log_buffer_size = 32M     # For write-heavy workloads
+innodb_flush_log_at_trx_commit = 2 # Balances performance and durability
+
+# Temporary Table Handling
+tmp_table_size = 128M            # Prevents disk-based temp tables
+max_heap_table_size = 128M       # Matches tmp_table_size
+
+# File & Cache Management
+open_files_limit = 16000         # Ensures enough file descriptors
+table_definition_cache = 4000    # Speeds up table opening
