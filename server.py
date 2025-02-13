@@ -18,6 +18,7 @@ from sh import convert
 from bottle import Bottle
 from image_db import ImageDb
 from image_db import TIME_FORMAT
+from urllib.parse import unquote
 
 app = application = Bottle()
 
@@ -514,6 +515,8 @@ def get_image_record():
 
     search_type = query_params.get('search_type', default='filename')
     query_string = query_params.get('file_string', default='')
+    query_string = unquote(query_params.get('file_string', default=''))
+
     exact = str2bool(query_params.get('exact', default='False'))
     collection = query_params.get('coll')
 
