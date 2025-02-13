@@ -287,12 +287,25 @@ def static(path):
     return static_file(path, root=settings.BASE_DIR)
 
 
-def getFileUrl(filename, collection, image_type, scale):
-    server_name = f"{settings.SERVER_NAME}:{settings.SERVER_PORT}" if settings.OVERRIDE_PORT else settings.SERVER_NAME
+def getFileUrl(filename, collection, file_type, scale, override_url=False):
+    """getFileUrl: creates server url for images.
+        params:
+            filename: name of file to create url for
+            collection: the scientific collection that the image is part of.
+            image_type: file, jpg, tif, pdf
+            scale: the scale to save the file or image. 0 is original size.
+            override_url: used override the sever name variable for a custom public server name
+    """
+    if override_url:
+        server_name = f"{settings.PUBLIC_SERVER}:{settings.PUBLIC_SERVER_PORT}"
+        protocol = "https://"
+    else:
+        server_name = f"{settings.SERVER_NAME}:{settings.SERVER_PORT}" if settings.OVERRIDE_PORT else settings.SERVER_NAME
+        protocol = settings.SERVER_PROTOCOL
 
-    return '%s://%s/static/%s' % (settings.SERVER_PROTOCOL,
+    return '%s://%s/static/%s' % (protocol,
                                   server_name,
-                                  pathname2url(resolve_file(filename, collection, image_type, scale))
+                                  pathname2url(resolve_file(filename, collection, file_type, scale))
                                   )
 
 
@@ -433,7 +446,7 @@ def fileupload():
 
     try:
         image_db.create_image_record(original_filename,
-                                     getFileUrl(storename, request.forms.coll, 'file', 0),
+                                     getFileUrl(storename, request.forms.coll, 'file', 0, settings.INTERNAL),
                                      storename,
                                      request.forms.coll,
                                      original_path,
