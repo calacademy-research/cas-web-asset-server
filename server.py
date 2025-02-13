@@ -293,13 +293,13 @@ def getFileUrl(filename, collection, file_type, scale, override_url=False):
         params:
             filename: name of file to create url for
             collection: the scientific collection that the image is part of.
-            image_type: file, jpg, tif, pdf
+            file_type: file, jpg, tif, pdf
             scale: the scale to save the file or image. 0 is original size.
             override_url: used override the sever name variable for a custom public server name
     """
     if override_url:
         server_name = f"{settings.PUBLIC_SERVER}:{settings.PUBLIC_SERVER_PORT}"
-        protocol = "https://"
+        protocol = "https"
     else:
         server_name = f"{settings.SERVER_NAME}:{settings.SERVER_PORT}" if settings.OVERRIDE_PORT else settings.SERVER_NAME
         protocol = settings.SERVER_PROTOCOL
@@ -324,7 +324,8 @@ def getfileref():
     return getFileUrl(request.query.filename,
                       request.query.coll,
                       request.query['type'],
-                      request.query.scale)
+                      request.query.scale,
+                      settings.INTERNAL)
 
 
 

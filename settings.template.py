@@ -61,9 +61,10 @@ OVERRIDE_PORT = False
 
 # used for when splitting the server into public and internal versions.
 # allowing  changes made via internal server to be accessible via the public server.
-INTERNAL = False
+INTERNAL = True
 if INTERNAL:
-    PUBLIC_SERVER = "https://your_public_server_url"
+    PUBLIC_SERVER = "ibss-images.calacademy.org"
+    PUBLIC_SERVER_PORT = 443
 # default text encoding for command line level subprocesses.
 ENCODING = "C.UTF-8"
 
