@@ -59,6 +59,12 @@ DEVELOPMENT_PORT = PORT
 # set to TRUE when using port other than 80 on http or 443 on https, as requests defaults to 80/443 in the url
 OVERRIDE_PORT = False
 
+# used for when splitting the server into public and internal versions.
+# allowing  changes made via internal server to be accessible via the public server.
+INTERNAL = True
+if INTERNAL:
+    PUBLIC_SERVER = "ibss-images.calacademy.org"
+    PUBLIC_SERVER_PORT = 443
 # default text encoding for command line level subprocesses.
 ENCODING = "C.UTF-8"
 
