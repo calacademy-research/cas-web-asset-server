@@ -38,6 +38,8 @@ services:
     restart: unless-stopped
     image: mysql:8
     container_name: mysql-images
+    ulimits:
+      stack: 8388608 #linux default for one thread, adjust and eval for multithreading
     volumes:
       - ./data:/var/lib/mysql:delegated
       - ./mysql.cnf:/etc/mysql/conf.d/my.cnf
