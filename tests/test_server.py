@@ -1,8 +1,4 @@
-import pandas as pd
 import pytest
-import sys
-
-import server
 import settings
 import filecmp
 import requests
@@ -20,7 +16,7 @@ from collection_definitions import COLLECTION_DIRS
 from image_db import TIME_FORMAT_NO_OFFSET
 import hashlib
 from metadata_tools.EXIF_constants import EXIFConstants
-
+import contextlib
 
 def get_file_md5(filename):
     with open(filename, 'rb') as f:
@@ -31,7 +27,8 @@ def get_file_md5(filename):
 
 attach_loc = "None"
 TEST_JPG = "tests/test.jpg"
-TEST_PATH = "/foo/bar/baz"
+TEST_PATH = "/foo/bar/baz/"
+NEW_PATH = "/new/test/path/"
 TEST_NOTES = "alskeifhjais78yas8efhaisef87yaihrti478yfhudyhdrsifslfdhiju"
 dt, tz = '2020-01-01 00:00:01 UTC'.rsplit(maxsplit=1)
 
@@ -46,11 +43,24 @@ EXIF_DICT = {
 }
 
 @pytest.fixture(scope='function', autouse=True)
-def test_teardown(request):
+def test_teardown():
+    yield
     try:
         delete_attach_loc()
-    except:
-        pass
+    except Exception as e:
+        print(f"Teardown failed: {e}")
+
+@contextlib.contextmanager
+def restore_globals():
+    """Context manager to restore global TEST_PATH and attach_loc after a test block"""
+    global TEST_PATH, attach_loc
+    old_path = TEST_PATH
+    old_loc = attach_loc
+    try:
+        yield
+    finally:
+        TEST_PATH = old_path
+        attach_loc = old_loc
 
 
 def setup_module():
@@ -68,11 +78,11 @@ def test_root():
 def test_web_asset_store():
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <urls>
-    <url type="read"><![CDATA[https://{settings.SERVER_NAME}:{settings.SERVER_PORT}/fileget]]></url>
-    <url type="write"><![CDATA[https://{settings.SERVER_NAME}:{settings.SERVER_PORT}/fileupload]]></url>
-    <url type="delete"><![CDATA[https://{settings.SERVER_NAME}:{settings.SERVER_PORT}/filedelete]]></url>
-    <url type="getexifdata"><![CDATA[https://{settings.SERVER_NAME}:{settings.SERVER_PORT}/getexifdata]]></url>
-    <url type="testkey">https://{settings.SERVER_NAME}:{settings.SERVER_PORT}/testkey</url>
+    <url type="read"><![CDATA[{settings.SERVER_PROTOCOL}://{settings.SERVER_NAME}:{settings.SERVER_PORT}/fileget]]></url>
+    <url type="write"><![CDATA[{settings.SERVER_PROTOCOL}://{settings.SERVER_NAME}:{settings.SERVER_PORT}/fileupload]]></url>
+    <url type="delete"><![CDATA[{settings.SERVER_PROTOCOL}://{settings.SERVER_NAME}:{settings.SERVER_PORT}/filedelete]]></url>
+    <url type="getexifdata"><![CDATA[{settings.SERVER_PROTOCOL}://{settings.SERVER_NAME}:{settings.SERVER_PORT}/getexifdata]]></url>
+    <url type="testkey">{settings.SERVER_PROTOCOL}://{settings.SERVER_NAME}:{settings.SERVER_PORT}/testkey</url>
 </urls>
 """
     endpoint = "web_asset_store.xml"
@@ -92,6 +102,7 @@ def test_testkey():
 
 
 def delete_attach_loc():
+    global TEST_PATH
     data = {
         'filename': attach_loc,
         'coll': list(COLLECTION_DIRS.keys())[0],
@@ -107,6 +118,7 @@ def delete_attach_loc():
 
 def post_test_file(supplementary_data={}, uuid_override=None, md5=False):
     global attach_loc
+    global TEST_PATH
     local_filename = TEST_JPG
     if uuid_override is not None:
         uuid = uuid_override
@@ -115,14 +127,15 @@ def post_test_file(supplementary_data={}, uuid_override=None, md5=False):
     name, extension = splitext(local_filename)
     attach_loc = uuid + extension
 
-
     data = {
         'store': attach_loc,
         'type': 'image',
         'coll': list(COLLECTION_DIRS.keys())[0],
         'token': generate_token(get_timestamp(), attach_loc),
-        'original_filename': local_filename
+        'original_filename': local_filename,
+        'original_path': TEST_PATH + local_filename
     }
+
     if md5:
         md5 = get_file_md5(TEST_JPG)
         data['orig_md5']= md5
@@ -444,7 +457,7 @@ def post_with_metadata(redacted=True, uuid_override=None):
         'coll': list(COLLECTION_DIRS.keys())[0],
         'token': generate_token(get_timestamp(), attach_loc),
         'original_filename': local_filename,
-        'original_path': TEST_PATH,
+        'original_path': TEST_PATH + TEST_JPG,
         'redacted': redacted,
         'notes': TEST_NOTES,
         'datetime': TEST_DATE
@@ -485,7 +498,7 @@ def test_get_redacted_image_by_original_filename():
 
     data = json.loads(r.text)
     assert data[-1]['original_filename'] == TEST_JPG
-    assert data[-1]['original_path'] == TEST_PATH
+    assert data[-1]['original_path'] == TEST_PATH + TEST_JPG
     assert data[-1]['notes'] == TEST_NOTES
     assert data[-1]['redacted']
     assert pytz.utc.localize(datetime.strptime(data[-1]['datetime'], TIME_FORMAT_NO_OFFSET)) == TEST_DATE
@@ -511,7 +524,7 @@ def test_get_non_redacted_image_by_original_filename():
 
     data = json.loads(r.text)
     assert data[-1]['original_filename'] == TEST_JPG
-    assert data[-1]['original_path'] == TEST_PATH
+    assert data[-1]['original_path'] == TEST_PATH + TEST_JPG
     assert data[-1]['notes'] == TEST_NOTES
     assert data[-1]['redacted'] == False
     assert pytz.utc.localize(datetime.strptime(data[-1]['datetime'], TIME_FORMAT_NO_OFFSET)) == TEST_DATE
@@ -562,13 +575,31 @@ def test_file_get_redacted_cases():
 
 
 def test_name_collision_failure():
+    global attach_loc, TEST_JPG, TEST_PATH, NEW_PATH
+
     uuid = str(uuid4())
 
+    # First upload (should succeed)
     r = post_test_file(uuid_override=uuid)
     assert r.status_code == 200
 
+    # Second upload with same UUID (should fail with 409)
     r = post_test_file(uuid_override=uuid)
     assert r.status_code == 409
+
+    # Post with same path but different UUID (should fail)
+    with restore_globals():
+        r = post_test_file()
+        assert r.status_code == 409
+
+    # Post with different path but same filename (should work)
+    with restore_globals():
+        TEST_PATH = NEW_PATH
+        r = post_test_file()
+        assert r.status_code == 200
+
+        r = delete_attach_loc()
+        assert r.status_code == 200
 
     params = {
         'file_string': TEST_JPG,
@@ -581,34 +612,13 @@ def test_name_collision_failure():
     r = requests.get(build_url("getImageRecord"), params=params)
 
     if r.status_code == 200:
-        # If the file exists, ensure the response data only contains a single entry
+        # Ensure only one record exists
         records = r.json()
         assert isinstance(records, list), "Expected a list of records"
         assert len(records) == 1, f"Expected 1 record, got {len(records)}"
 
     r = delete_attach_loc()
     assert r.status_code == 200
-
-
-
-def test_duplicate_basename_failure():
-    global attach_loc
-
-    uuid = str(uuid4())
-
-    r = post_test_file(uuid_override=uuid)
-    assert r.status_code == 200
-
-    attach_loc = "test_string"
-
-    r = post_test_file(uuid_override=uuid)
-    assert r.status_code == 409
-
-    r = delete_attach_loc()
-    assert r.status_code == 200
-
-    attach_loc = "None"
-
 
 
 def test_static_redacted():
