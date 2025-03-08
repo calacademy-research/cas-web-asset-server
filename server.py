@@ -402,8 +402,8 @@ def fileupload():
     if thumb_p:
         return 'Ignoring thumbnail upload!'
     if 'original_path' in request.forms.keys():
-        response_list = image_db.get_image_record_by_original_filename(original_filename=request.forms['original_filename'],
-                                                                       collection=request.forms.coll, exact=True)
+        response_list = image_db.get_image_record_by_original_path(original_path=request.forms['original_path'],
+                                                                   collection=request.forms.coll, exact=True)
     else:
         response_list = []
 
