@@ -15,7 +15,7 @@ from client_utilities import get_timestamp
 from collection_definitions import COLLECTION_DIRS
 from image_db import TIME_FORMAT_NO_OFFSET
 import hashlib
-from metadata_tools.EXIF_constants import EXIFConstants
+from cas_metadata_tools import EXIFConstants
 import contextlib
 
 def get_file_md5(filename):

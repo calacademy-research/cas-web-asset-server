@@ -14,9 +14,7 @@ WORKDIR /tmp
 RUN python3.12 -m venv venv
 ENV PATH="/tmp/venv/bin:$PATH"
 COPY requirements.txt /tmp/requirements.txt
-COPY metadata_tools/requirements.txt /tmp/metadata_tools/requirements.txt
 RUN /tmp/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
-RUN /tmp/venv/bin/pip install --no-cache-dir -r /tmp/metadata_tools/requirements.txt
 ENV TZ=America/Los_Angeles
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 WORKDIR /code
