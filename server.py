@@ -304,6 +304,11 @@ def getFileUrl(filename, collection, file_type, scale, override_url=False):
         server_name = f"{settings.SERVER_NAME}:{settings.SERVER_PORT}" if settings.OVERRIDE_PORT else settings.SERVER_NAME
         protocol = settings.SERVER_PROTOCOL
 
+    print('%s://%s/static/%s' % (protocol,
+                                  server_name,
+                                  pathname2url(resolve_file(filename, collection, file_type, scale))
+                                  ))
+
     return '%s://%s/static/%s' % (protocol,
                                   server_name,
                                   pathname2url(resolve_file(filename, collection, file_type, scale))
@@ -319,7 +324,7 @@ def getfileref():
         log("static file access denied")
         abort(404)
     response.content_type = 'text/plain; charset=utf-8'
-    log(f"{getFileUrl(request.query.filename,request.query.coll,request.query['type'],request.query.scale)}")
+    log(f"{getFileUrl(request.query.filename,request.query.coll,request.query['type'],request.query.scale, settings.INTERNAL)}")
 
     return getFileUrl(request.query.filename,
                       request.query.coll,

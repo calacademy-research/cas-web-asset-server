@@ -56,4 +56,4 @@ faker~=18.11.2
 pillow~=10.3.0
 wrapt-timeout-decorator~=1.5.1
 testfixtures~=8.3.0
-cas-metadata-tools
+cas-metadata-tools~=1.0.1
