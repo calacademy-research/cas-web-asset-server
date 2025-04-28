@@ -13,7 +13,7 @@ import time
 from collection_definitions import COLLECTION_DIRS
 from datetime import datetime
 from time import sleep
-from metadata_tools.metadata_tools import MetadataTools
+from cas_metadata_tools import MetadataTools
 from sh import convert
 from bottle import Bottle
 from image_db import ImageDb
@@ -553,7 +553,7 @@ def get_exif_metadata():
     if not path.exists(pathname):
         abort(404)
 
-    exif_instance = MetadataTools(pathname, encoding=settings.ENCODING)
+    exif_instance = MetadataTools(pathname)
     try:
         tags = exif_instance.read_exif_tags()
 
@@ -592,7 +592,7 @@ def updateexifdata():
             abort(400)
 
         if isinstance(exif_data, dict):
-            md = MetadataTools(path=rel_path, encoding=settings.ENCODING)
+            md = MetadataTools(path=rel_path)
             try:
                 md.write_exif_tags(exif_dict=exif_data)
             except:
