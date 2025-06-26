@@ -299,15 +299,15 @@ def getFileUrl(filename, collection, file_type, scale, override_url=False):
     """
     if override_url:
         server_name = f"{settings.PUBLIC_SERVER}:{settings.PUBLIC_SERVER_PORT}"
-        protocol = "https"
+        protocol = settings.PUBLIC_SERVER_PROTOCOL
     else:
         server_name = f"{settings.SERVER_NAME}:{settings.SERVER_PORT}" if settings.OVERRIDE_PORT else settings.SERVER_NAME
         protocol = settings.SERVER_PROTOCOL
 
-    print('%s://%s/static/%s' % (protocol,
-                                  server_name,
-                                  pathname2url(resolve_file(filename, collection, file_type, scale))
-                                  ))
+    log('%s://%s/static/%s' % (protocol,
+                               server_name,
+                               pathname2url(resolve_file(filename, collection, file_type, scale))
+                                ))
 
     return '%s://%s/static/%s' % (protocol,
                                   server_name,
