@@ -65,6 +65,7 @@ INTERNAL = True
 if INTERNAL:
     PUBLIC_SERVER = "ibss-images.calacademy.org"
     PUBLIC_SERVER_PORT = 443
+    PUBLIC_SERVER_PROTOCOL = "https"
 # default text encoding for command line level subprocesses.
 ENCODING = "C.UTF-8"
 
