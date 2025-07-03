@@ -6,15 +6,31 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     ca-certificates tzdata wget curl python3-pip python3-setuptools \
     build-essential libffi-dev imagemagick libimage-exiftool-perl \
-    gcc-aarch64-linux-gnu uwsgi uwsgi-plugin-python3 python3.12-venv\
+    gcc-aarch64-linux-gnu uwsgi uwsgi-plugin-python3 python3.12-venv \
+    python3.12-dev \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Create working directory
 WORKDIR /tmp
-# Create virtual environment in a different directory
+
+# Create virtual environment
 RUN python3.12 -m venv venv
 ENV PATH="/tmp/venv/bin:$PATH"
+
+# Add S3 support
 COPY requirements.txt /tmp/requirements.txt
 RUN /tmp/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
+RUN /tmp/venv/bin/pip install boto3
+
+# Optional: install AWS CLI for testing/debugging
+RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" \
+    && apt-get update && apt-get install -y unzip \
+    && unzip awscliv2.zip && ./aws/install \
+    && rm -rf awscliv2.zip aws
+
+# Set timezone
 ENV TZ=America/Los_Angeles
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# Switch to code directory
 WORKDIR /code
