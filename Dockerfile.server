@@ -34,3 +34,13 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # Switch to code directory
 WORKDIR /code
+
+# copy and mark entrypoint
+#COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+#RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Make entrypoint.sh the container's entrypoint
+#ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# The CMD will be passed as "$@" to entrypoint.sh
+#CMD ["uwsgi", "--plugin", "/usr/lib/uwsgi/plugins/python312_plugin.so", "--ini", "uwsgi.ini"]

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 import logging
 import os  # added for S3 toggle
 from functools import wraps
@@ -32,14 +31,26 @@ if USE_S3:
     S3_ACCESS_KEY = os.getenv('S3_ACCESS_KEY')
     S3_SECRET_KEY = os.getenv('S3_SECRET_KEY')
     S3_URL_EXPIRY = int(os.getenv('S3_URL_EXPIRY','3600'))
+    S3_REGION = os.getenv('S3_REGION')
 
     _session = boto3.session.Session()
     _s3 = _session.client(
         's3',
         endpoint_url=S3_ENDPOINT,
         aws_access_key_id=S3_ACCESS_KEY,
-        aws_secret_access_key=S3_SECRET_KEY
+        aws_secret_access_key=S3_SECRET_KEY,
+        region_name=S3_REGION
     )
+
+    # ── INSERT BUCKET BOOTSTRAP HERE ──
+    # try:
+    #     _s3.head_bucket(Bucket=S3_BUCKET)
+    # except ClientError as e:
+    #     code = e.response['Error']['Code']
+    #     if code in ('404', 'NoSuchBucket'):
+    #         _s3.create_bucket(Bucket=S3_BUCKET)
+    #     else:
+    #         raise
 
 app = application = Bottle()
 
@@ -60,7 +71,13 @@ BaseRequest.MEMFILE_MAX = 300 * 1024 * 1024
 def s3_key(p):
     return p.lstrip('/')
 
+
 def storage_exists(rel):
+    local = path.join(settings.BASE_DIR, rel)
+    # 1) Local volume present?
+    if path.exists(local):
+        return True
+    # 2) Else if S3 mode, ask S3
     if USE_S3:
         try:
             _s3.head_object(Bucket=S3_BUCKET, Key=s3_key(rel))
@@ -69,30 +86,49 @@ def storage_exists(rel):
             if e.response['Error']['Code'] == '404':
                 return False
             raise
-    return path.exists(path.join(settings.BASE_DIR, rel))
+    return False
 
 def storage_save(rel, fobj):
-    if USE_S3:
-        _s3.put_object(Bucket=S3_BUCKET, Key=s3_key(rel), Body=fobj.read())
-    else:
-        dest = path.join(settings.BASE_DIR, rel)
-        makedirs(path.dirname(dest), exist_ok=True)
-        with open(dest, 'wb') as o:
+    local = path.join(settings.BASE_DIR, rel)
+    local_dir = path.dirname(local)
+    # 1) If volume-mounted dir exists or USE_S3 is false-> FS
+    if path.isdir(local_dir) or not USE_S3:
+        makedirs(local_dir, exist_ok=True)
+        with open(local, 'wb') as o:
             o.write(fobj.read())
+        return
+    # 2) Else S3
+    fobj.seek(0)
+    _s3.put_object(Bucket=S3_BUCKET, Key=s3_key(rel), Body=fobj.read())
 
 def storage_delete(rel):
+    local = path.join(settings.BASE_DIR, rel)
+    if path.exists(local):
+        remove(local)
+        return
     if USE_S3:
         _s3.delete_object(Bucket=S3_BUCKET, Key=s3_key(rel))
-    else:
-        remove(path.join(settings.BASE_DIR, rel))
+        return
+    # neither storage found
+    abort(404)
 
 def storage_download(rel):
-    tmp = tempfile.NamedTemporaryFile(delete=False)
-    tmp.close()
-    _s3.download_file(S3_BUCKET, s3_key(rel), tmp.name)
-    return tmp.name
+    local = path.join(settings.BASE_DIR, rel)
+    if path.exists(local):
+        return local
+    if USE_S3:
+        tmp = tempfile.NamedTemporaryFile(delete=False)
+        tmp.close()
+        _s3.download_file(S3_BUCKET, s3_key(rel), tmp.name)
+        return tmp.name
+    abort(404)
+
 
 def storage_url(rel):
+    local = path.join(settings.BASE_DIR, rel)
+    if path.exists(local):
+        # if you wanted to serve local files via /static, storage_url can return None
+        return None
     if USE_S3:
         return _s3.generate_presigned_url(
             'get_object',
