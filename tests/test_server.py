@@ -68,11 +68,11 @@ def test_root():
 def test_web_asset_store():
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <urls>
-    <url type="read"><![CDATA[https://{settings.SERVER_NAME}:{settings.SERVER_PORT}/fileget]]></url>
-    <url type="write"><![CDATA[https://{settings.SERVER_NAME}:{settings.SERVER_PORT}/fileupload]]></url>
-    <url type="delete"><![CDATA[https://{settings.SERVER_NAME}:{settings.SERVER_PORT}/filedelete]]></url>
-    <url type="getexifdata"><![CDATA[https://{settings.SERVER_NAME}:{settings.SERVER_PORT}/getexifdata]]></url>
-    <url type="testkey">https://{settings.SERVER_NAME}:{settings.SERVER_PORT}/testkey</url>
+    <url type="read"><![CDATA[{settings.SERVER_PROTOCOL}://{settings.SERVER_NAME}:{settings.SERVER_PORT}/fileget]]></url>
+    <url type="write"><![CDATA[{settings.SERVER_PROTOCOL}://{settings.SERVER_NAME}:{settings.SERVER_PORT}/fileupload]]></url>
+    <url type="delete"><![CDATA[{settings.SERVER_PROTOCOL}://{settings.SERVER_NAME}:{settings.SERVER_PORT}/filedelete]]></url>
+    <url type="getexifdata"><![CDATA[{settings.SERVER_PROTOCOL}://{settings.SERVER_NAME}:{settings.SERVER_PORT}/getexifdata]]></url>
+    <url type="testkey">{settings.SERVER_PROTOCOL}://{settings.SERVER_NAME}:{settings.SERVER_PORT}/testkey</url>
 </urls>
 """
     endpoint = "web_asset_store.xml"

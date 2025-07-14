@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urls>
-    <url type="read"><![CDATA[https://{{host}}/fileget]]></url>
-    <url type="write"><![CDATA[https://{{host}}/fileupload]]></url>
-    <url type="delete"><![CDATA[https://{{host}}/filedelete]]></url>
-    <url type="getexifdata"><![CDATA[https://{{host}}/getexifdata]]></url>
-    <url type="testkey">https://{{host}}/testkey</url>
+    <url type="read"><![CDATA[{{protocol}}://{{host}}/fileget]]></url>
+    <url type="write"><![CDATA[{{protocol}}://{{host}}/fileupload]]></url>
+    <url type="delete"><![CDATA[{{protocol}}://{{host}}/filedelete]]></url>
+    <url type="getexifdata"><![CDATA[{{protocol}}://{{host}}/getexifdata]]></url>
+    <url type="testkey">{{protocol}}://{{host}}/testkey</url>
 </urls>
