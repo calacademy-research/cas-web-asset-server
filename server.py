@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 import logging
 import os
 tempfile_imported = False
@@ -18,7 +19,7 @@ from datetime import datetime
 from time import sleep
 from cas_metadata_tools import MetadataTools
 from sh import convert
-from bottle import Bottle
+from bottle import Bottle, redirect
 from image_db import ImageDb
 from image_db import TIME_FORMAT
 from urllib.parse import unquote
@@ -77,8 +78,8 @@ def s3_key(p):
     return p.lstrip('/')
 
 def storage_exists(rel):
-    local = path.join(settings.BASE_DIR, rel)
-    if path.exists(local):
+    local_path = os.path.join(settings.BASE_DIR, rel)
+    if path.exists(local_path):
         return True
     if USE_S3:
         try:
@@ -314,9 +315,8 @@ def resolve_file(filename, collection, type, scale):
         os.makedirs(basepath, exist_ok=True)
 
     if USE_S3:
-        orig_key = os.path.join(
-            get_rel_path(collection, False, storename), storename
-        )
+        orig_key = os.path.join(get_rel_path(collection, False, storename), storename)
+
         if not storage_exists(orig_key):
             abort(404, f"Missing object: {orig_key}")
         input_path = storage_download(orig_key)
@@ -366,16 +366,15 @@ def static(path):
         return response
 
     if USE_S3:
-        return HTTPResponse(header={'Location': storage_url(path)})
+        url = storage_url(path)
+        if not url:
+            abort(404)
+        redirect(url)
 
     return static_file(path, root=settings.BASE_DIR)
 
 def getFileUrl(filename, collection, file_type, scale, override_url=False):
     """Create server URL for images."""
-    if USE_S3:
-        key = resolve_file(filename, collection, file_type, scale)
-        return storage_url(key)
-
     if override_url:
         server_name = f"{settings.PUBLIC_SERVER}:{settings.PUBLIC_SERVER_PORT}"
         protocol = settings.PUBLIC_SERVER_PROTOCOL
@@ -405,6 +404,7 @@ def getfileref():
         settings.INTERNAL
     )
 
+
 @app.route('/fileget')
 @require_token('filename')
 def fileget():
@@ -412,14 +412,15 @@ def fileget():
     log(f"fileget {request.query.filename}")
     image_db = get_image_db()
     records = image_db.get_image_record_by_internal_filename(request.query.filename)
-    log(f"Fileget complete")
+    log("Fileget complete")
     if len(records) < 1:
         log(f"Record not found: {request.query.filename}")
         response.content_type = 'text/plain; charset=utf-8'
         response.status = 404
         return response
+
     if records[0]['redacted']:
-        log(f"Redacted, check auth token")
+        log("Redacted, check auth token")
         try:
             validate_token(request.query.token, request.query.filename)
         except TokenException as e:
@@ -428,27 +429,40 @@ def fileget():
             response.body = f"403 - forbidden. Invalid token: '{request.query.token}'"
             log(response.body)
             return response
-        log(f"Token validated for redacted record...")
+        log("Token validated for redacted record...")
     else:
-        log(f"Not redacted, no check required")
-    log(f"Valid request: {request.query.filename}")
+        log("Not redacted, no check required")
 
+    log(f"Valid request: {request.query.filename}")
     resolved = resolve_file(
         request.query.filename,
         request.query.coll,
         request.query['type'],
         request.query.scale
     )
-    if USE_S3:
-        return HTTPResponse(header={'Location': storage_url(resolved)})
 
+    if USE_S3:
+        # pull down the object
+        tmp_path = storage_download(resolved)
+        dirpath, fname = path.split(tmp_path)
+
+        r = static_file(fname, root=dirpath, mimetype=None)
+        download_name = request.query.downloadname
+        if download_name:
+            dn = quote(path.basename(download_name).encode('ascii', 'replace'))
+            r.set_header('Content-Disposition', f"inline; filename*=utf-8''{dn}")
+        log(f"Get complete (S3 via static_file): {request.query.filename}")
+        return r
+
+    # fallback to local filesystem
     r = static_file(resolved, root=settings.BASE_DIR)
     download_name = request.query.downloadname
     if download_name:
-        dn = quote(path.basename(download_name).encode('ascii', 'replace'))
-        r.set_header('Content-Disposition', "inline; filename*=utf-8''%s" % dn)
-    log(f"Get complete:{request.query.filename}")
+        dn = quote(path.basename(download_name).encode('ascii','replace'))
+        r.set_header('Content-Disposition', f"inline; filename*=utf-8''{dn}")
+    log(f"Get complete (FS): {request.query.filename}")
     return r
+
 
 @app.route('/fileupload', method='OPTIONS')
 @allow_cross_origin
@@ -652,19 +666,35 @@ def get_image_record():
 def get_exif_metadata():
     """Provides access to EXIF metadata."""
     storename = request.query.filename
-    basepath = path.join(settings.BASE_DIR, get_rel_path(request.query.coll, thumb_p=False, storename=storename))
+    rel_path = get_rel_path(request.query.coll, thumb_p=False, storename=storename)
+    basepath = path.join(settings.BASE_DIR, rel_path)
     pathname = path.join(basepath, storename)
     datatype = request.query.dt
-    if not path.exists(pathname):
-        abort(404)
+    if USE_S3:
+        key = path.join(rel_path, storename)
+        if not storage_exists(key):
+            abort(404, f"Missing object: {key}")
+        local_path = storage_download(key)
+    else:
+        local_path = pathname
+        if not os.path.exists(local_path):
+            abort(404, f"Missing file: {local_path}")
 
-    exif_instance = MetadataTools(pathname)
+    exif_instance = MetadataTools(local_path)
+
     try:
         tags = exif_instance.read_exif_tags()
-
+        log("STOP 2")
     except Exception as e:
         log(f"Error reading EXIF data: {e}")
         tags = {}
+
+    if USE_S3:
+        try:
+            os.remove(local_path)
+            log("STOP 3")
+        except OSError:
+            pass
 
     if datatype == 'date':
         try:
@@ -673,7 +703,7 @@ def get_exif_metadata():
             abort(404, 'DateTime not found in EXIF')
 
     response.content_type = 'application/json'
-
+    log("STOP 4")
     return json.dumps(tags, indent=4, sort_keys=True, default=json_datetime_handler)
 
 @app.route('/updateexifdata', method='POST')
@@ -683,20 +713,27 @@ def updateexifdata():
     storename = request.forms.filename
     exif_data = request.forms.exif_dict
     exif_data = json.loads(exif_data)
-    base_root = path.join(settings.BASE_DIR, get_rel_path(request.forms.coll, thumb_p=False, storename=storename))
-    thumb_root = path.join(settings.BASE_DIR, get_rel_path(request.forms.coll, thumb_p=True, storename=storename))
+    base_root = path.join(get_rel_path(request.forms.coll, thumb_p=False, storename=storename))
+    thumb_root = path.join(get_rel_path(request.forms.coll, thumb_p=True, storename=storename))
     orig_path = path.join(base_root, storename)
     thumb_path = path.join(thumb_root, storename)
     path_list = [orig_path, thumb_path]
     for rel_path in path_list:
-        if not path.exists(rel_path):
-            abort(404)
 
         if not exif_data:
             abort(400)
 
+        if USE_S3:
+            if not storage_exists(rel_path):
+                abort(404, f"Missing object: {rel_path}")
+            local_path = storage_download(rel_path)
+        else:
+            local_path = os.path.join(settings.BASE_DIR, rel_path)
+            if not os.path.exists(local_path):
+                abort(404, f"Missing file: {local_path}")
+
         if isinstance(exif_data, dict):
-            md = MetadataTools(path=rel_path)
+            md = MetadataTools(path=local_path)
             try:
                 md.write_exif_tags(exif_dict=exif_data)
             except:
@@ -707,6 +744,11 @@ def updateexifdata():
                 return response
         else:
             log(f"exif_data is not a dictionary")
+
+        if USE_S3:
+            with open(local_path, 'rb') as f:
+                storage_save(rel_path, f)
+            os.remove(local_path)
 
         return f"{storename} updated with new exif metadata"
 
