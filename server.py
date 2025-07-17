@@ -73,11 +73,16 @@ from bottle import (
 
 BaseRequest.MEMFILE_MAX = 300 * 1024 * 1024
 
-# ─── Storage abstraction helpers ───────────────────────────────────────────────
+# ─── Storage abstraction helpers for S3 api ───────────────────────────────────────────────
 def s3_key(p):
+    """s3_key: preps the key path"""
     return p.lstrip('/')
 
 def storage_exists(rel):
+    """storage_exists: checks s3 api or local path for presence of relpath
+        args:
+            rel: relative path without base directory
+    """
     local_path = os.path.join(settings.BASE_DIR, rel)
     if path.exists(local_path):
         return True
@@ -92,19 +97,28 @@ def storage_exists(rel):
     return False
 
 
-def storage_save(rel, fobj):
+def storage_save(rel, file_object):
+    """storage_save: saves a filepath to s3 storage or local path
+        args:
+            rel: relative path without base directory.
+            file_object: the physical file data to save.
+    """
     local = path.join(settings.BASE_DIR, rel)
     local_dir = path.dirname(local)
     if path.isdir(local_dir) or not USE_S3:
         makedirs(local_dir, exist_ok=True)
         with open(local, 'wb') as o:
-            o.write(fobj.read())
+            o.write(file_object.read())
         return
-    fobj.seek(0)
-    get_s3().put_object(Bucket=S3_BUCKET, Key=s3_key(rel), Body=fobj.read())
+    file_object.seek(0)
+    get_s3().put_object(Bucket=S3_BUCKET, Key=s3_key(rel), Body=file_object.read())
 
 
 def storage_delete(rel):
+    """storage_delete: deletes relative path from local or s3 api storage
+        args:
+            rel: relative path to file , without base directory
+    """
     local = path.join(settings.BASE_DIR, rel)
     if path.exists(local):
         remove(local)
@@ -116,6 +130,10 @@ def storage_delete(rel):
 
 
 def storage_download(rel):
+    """storage_download: downloads file from either local or s3 storage
+        args:
+            rel: relative path to file without base directory
+    """
     local = path.join(settings.BASE_DIR, rel)
     if path.exists(local):
         return local
@@ -128,6 +146,10 @@ def storage_download(rel):
 
 
 def storage_url(rel):
+    """storage_url: retrieves URL to image at s3 storage endpoint
+        args:
+            rel: relative path to image without base directory
+    """
     local = path.join(settings.BASE_DIR, rel)
     if path.exists(local):
         return None
@@ -139,7 +161,7 @@ def storage_url(rel):
         )
     return None
 
-# ─── End storage helpers ──────────────────────────────────────────────────────
+# ─── End S3 api storage helpers ──────────────────────────────────────────────────────
 
 def get_image_db():
     image_db = ImageDb()
