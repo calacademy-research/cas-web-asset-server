@@ -791,6 +791,15 @@ def web_asset_store():
     return template('web_asset_store.xml', host="%s:%d" % (settings.SERVER_NAME, settings.SERVER_PORT),
                     protocol=settings.SERVER_PROTOCOL)
 
+@app.route('/robots.txt')
+@include_timestamp
+def retrieve_robots_txt():
+    """serve a txt file describing permitted bot and webcrawler access"""
+    response.content_type = 'text/plain; charset=utf-8'
+    root = os.path.join(os.path.dirname(__file__), 'views')
+    return static_file('robots.txt', root=root, mimetype='text/plain')
+
+
 @app.route('/')
 def main_page():
     log("Hit root")
