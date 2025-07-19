@@ -3,9 +3,7 @@
 import logging
 import os
 tempfile_imported = False
-from functools import wraps, lru_cache
-import boto3
-from botocore.exceptions import ClientError
+from functools import wraps
 from glob import glob
 from mimetypes import guess_type
 from os import makedirs, path, remove
@@ -19,45 +17,11 @@ from datetime import datetime
 from time import sleep
 from cas_metadata_tools import MetadataTools
 from sh import convert
-from bottle import Bottle, redirect
+from bottle import Bottle
 from image_db import ImageDb
 from image_db import TIME_FORMAT
 from urllib.parse import unquote
-import tempfile
-
-# S3 imports only when enabled
-USE_S3 = os.getenv('USE_S3', 'false').lower() in ('1', 'true', 'yes')
-if USE_S3:
-    S3_ENDPOINT   = os.getenv('S3_ENDPOINT')
-    S3_BUCKET     = os.getenv('S3_BUCKET')
-    S3_ACCESS_KEY = os.getenv('S3_ACCESS_KEY')
-    S3_SECRET_KEY = os.getenv('S3_SECRET_KEY')
-    S3_URL_EXPIRY = int(os.getenv('S3_URL_EXPIRY', '3600'))
-    S3_REGION     = os.getenv('S3_REGION')
-
-@lru_cache(maxsize=1)
-def get_s3():
-    """Lazy-initialized singleton S3 client"""
-    if not USE_S3:
-        raise RuntimeError("S3 is not enabled")
-    session = boto3.session.Session()
-    s3 = session.client(
-        's3',
-        endpoint_url=S3_ENDPOINT,
-        aws_access_key_id=S3_ACCESS_KEY,
-        aws_secret_access_key=S3_SECRET_KEY,
-        region_name=S3_REGION
-    )
-    # ensure bucket exists
-    try:
-        s3.head_bucket(Bucket=S3_BUCKET)
-    except ClientError as e:
-        code = e.response['Error']['Code']
-        if code in ('404', 'NoSuchBucket'):
-            s3.create_bucket(Bucket=S3_BUCKET)
-        else:
-            raise
-    return s3
+from s3_server_utils import *
 
 app = application = Bottle()
 
@@ -72,102 +36,14 @@ from bottle import (
     HTTPResponse)
 
 BaseRequest.MEMFILE_MAX = 300 * 1024 * 1024
-
-# ─── Storage abstraction helpers for S3 api ───────────────────────────────────────────────
-def s3_key(p):
-    """s3_key: preps the key path"""
-    return p.lstrip('/')
-
-def storage_exists(rel):
-    """storage_exists: checks s3 api or local path for presence of relpath
-        args:
-            rel: relative path without base directory
-    """
-    local_path = os.path.join(settings.BASE_DIR, rel)
-    if path.exists(local_path):
-        return True
-    if USE_S3:
-        try:
-            get_s3().head_object(Bucket=S3_BUCKET, Key=s3_key(rel))
-            return True
-        except ClientError as e:
-            if e.response['Error']['Code'] == '404':
-                return False
-            raise
-    return False
-
-
-def storage_save(rel, file_object):
-    """storage_save: saves a filepath to s3 storage or local path
-        args:
-            rel: relative path without base directory.
-            file_object: the physical file data to save.
-    """
-    local = path.join(settings.BASE_DIR, rel)
-    local_dir = path.dirname(local)
-    if path.isdir(local_dir) or not USE_S3:
-        makedirs(local_dir, exist_ok=True)
-        with open(local, 'wb') as o:
-            o.write(file_object.read())
-        return
-    file_object.seek(0)
-    get_s3().put_object(Bucket=S3_BUCKET, Key=s3_key(rel), Body=file_object.read())
-
-
-def storage_delete(rel):
-    """storage_delete: deletes relative path from local or s3 api storage
-        args:
-            rel: relative path to file , without base directory
-    """
-    local = path.join(settings.BASE_DIR, rel)
-    if path.exists(local):
-        remove(local)
-        return
-    if USE_S3:
-        get_s3().delete_object(Bucket=S3_BUCKET, Key=s3_key(rel))
-        return
-    abort(404)
-
-
-def storage_download(rel):
-    """storage_download: downloads file from either local or s3 storage
-        args:
-            rel: relative path to file without base directory
-    """
-    local = path.join(settings.BASE_DIR, rel)
-    if path.exists(local):
-        return local
-    if USE_S3:
-        tmp = tempfile.NamedTemporaryFile(delete=False)
-        tmp.close()
-        get_s3().download_file(S3_BUCKET, s3_key(rel), tmp.name)
-        return tmp.name
-    abort(404)
-
-
-def storage_url(rel):
-    """storage_url: retrieves URL to image at s3 storage endpoint
-        args:
-            rel: relative path to image without base directory
-    """
-    local = path.join(settings.BASE_DIR, rel)
-    if path.exists(local):
-        return None
-    elif USE_S3:
-        return get_s3().generate_presigned_url(
-            'get_object',
-            Params={'Bucket': S3_BUCKET, 'Key': s3_key(rel)},
-            ExpiresIn=S3_URL_EXPIRY
-        )
-    return None
-
-# ─── End S3 api storage helpers ──────────────────────────────────────────────────────
-
 def get_image_db():
     image_db = ImageDb()
     return image_db
+
+
 def log(msg):
     logging.debug(msg)
+
 
 def get_rel_path(coll, thumb_p, storename):
     """Return originals or thumbnails subdirectory of the main
@@ -188,6 +64,7 @@ def get_rel_path(coll, thumb_p, storename):
 
     return path.join(coll_dir, type_dir, first_subdir, second_subdir)
 
+
 def str2bool(value, raise_exc=False):
     """converts diverse string values into boolean True or False,
        replaces deprecated distutils and str2bool."""
@@ -205,6 +82,7 @@ def str2bool(value, raise_exc=False):
         raise ValueError('Expected "%s"' % '", "'.join(true_set | false_set))
     return None
 
+
 def generate_token(timestamp, filename):
     """Generate the auth token for the given filename and timestamp."""
     timestamp = str(timestamp)
@@ -215,13 +93,16 @@ def generate_token(timestamp, filename):
     mac = hmac.new(settings.KEY.encode(), timestamp.encode() + filename.encode(), digestmod='md5')
     return ':'.join((mac.hexdigest(), timestamp))
 
+
 class TokenException(Exception):
     """Raised when an auth token is invalid for some reason."""
     pass
 
+
 def get_timestamp():
     """Return an integer timestamp with one second resolution."""
     return int(time.time())
+
 
 def validate_token(token_in, filename):
     """Validate the input token for given filename using the secret key."""
@@ -247,6 +128,7 @@ def validate_token(token_in, filename):
         raise TokenException("Auth token is invalid.")
     log(f"Valid token: {token_in} time: {timestr}")
 
+
 def require_token(filename_param, always=False):
     """Decorate a view function to require an auth token."""
     def decorator(func):
@@ -267,6 +149,7 @@ def require_token(filename_param, always=False):
         return wrapper
     return decorator
 
+
 def include_timestamp(func):
     """Include the X-Timestamp header to help clients maintain sync."""
     @wraps(func)
@@ -276,6 +159,7 @@ def include_timestamp(func):
             .set_header('X-Timestamp', str(get_timestamp()))
         return result
     return wrapper
+
 
 def allow_cross_origin(func):
     """Allow cross domain access."""
@@ -291,6 +175,7 @@ def allow_cross_origin(func):
         return result
     return wrapper
 
+
 def resolve_file(filename, collection, type, scale):
     """
     Inspect the request object to determine the file being requested.
@@ -300,18 +185,10 @@ def resolve_file(filename, collection, type, scale):
     thumb_p = (type == "T")
     storename = filename
     relpath = get_rel_path(collection, thumb_p, storename)
+    file_path = os.path.join(relpath, storename)
 
-    # Helper to return original (or abort if missing in S3)
-    def _orig_location():
-        rel = os.path.join(relpath, storename)
-        if USE_S3:
-            if not storage_exists(rel):
-                abort(404, f"Missing object: {rel}")
-        return rel
-
-    # Non‐thumbnail: just return original
     if not thumb_p:
-        return _orig_location()
+        return orig_location(file_path)
 
     scale = int(scale)
     mimetype, encoding = guess_type(storename)
@@ -368,6 +245,7 @@ def resolve_file(filename, collection, type, scale):
 
     return rel_thumb
 
+
 @app.route('/static/<path:path>')
 def static(path):
     """Serve static files."""
@@ -388,12 +266,15 @@ def static(path):
         return response
 
     if USE_S3:
-        url = storage_url(path)
-        if not url:
-            abort(404)
-        redirect(url)
+        with storage_tempfile(path) as tmp_path:
+            mime, _ = guess_type(filename)
+            dirpath, fname = os.path.split(tmp_path)
+            resp = static_file(fname, root=dirpath, mimetype=mime)
+            resp.set_header('Content-Disposition', f'inline; filename="{filename}"')
+            return resp
 
     return static_file(path, root=settings.BASE_DIR)
+
 
 def getFileUrl(filename, collection, file_type, scale, override_url=False):
     """Create server URL for images."""
@@ -409,6 +290,7 @@ def getFileUrl(filename, collection, file_type, scale, override_url=False):
         server_name,
         pathname2url(resolve_file(filename, collection, file_type, scale))
     )
+
 
 @app.route('/getfileref')
 @allow_cross_origin
@@ -492,6 +374,7 @@ def fileupload_options():
     response.content_type = "text/plain; charset=utf-8"
     return ''
 
+
 @app.route('/fileupload', method='POST')
 @allow_cross_origin
 @require_token('store')
@@ -541,7 +424,7 @@ def fileupload():
             )
             resp = get_s3().list_objects_v2(Bucket=S3_BUCKET, Prefix=key)
             s3_exists = bool(resp.get('Contents'))
-        except ClientError as e:
+        except Exception as e:
             log(f"S3 list_objects_v2 error: {e}")
             abort(500, f"S3 error: {e}")
 
@@ -645,10 +528,12 @@ def filedelete():
     image_db.delete_image_record(storename)
     return 'Ok.'
 
+
 def json_datetime_handler(x):
     if isinstance(x, datetime):
         return x.strftime(TIME_FORMAT)
     raise TypeError("Unknown type")
+
 
 @app.route('/getImageRecord')
 @require_token('file_string', always=True)
@@ -682,6 +567,7 @@ def get_image_record():
         abort(404)
 
     return json.dumps(record_list, indent=4, sort_keys=True, default=json_datetime_handler)
+
 
 @app.route('/getexifdata')
 @require_token('filename')
@@ -727,6 +613,7 @@ def get_exif_metadata():
     response.content_type = 'application/json'
     log("STOP 4")
     return json.dumps(tags, indent=4, sort_keys=True, default=json_datetime_handler)
+
 
 @app.route('/updateexifdata', method='POST')
 @require_token('filename')
@@ -774,6 +661,7 @@ def updateexifdata():
 
         return f"{storename} updated with new exif metadata"
 
+
 @app.route('/testkey')
 @require_token('random', always=True)
 def testkey():
@@ -783,6 +671,7 @@ def testkey():
     response.content_type = 'text/plain; charset=utf-8'
     return 'Ok.'
 
+
 @app.route('/web_asset_store.xml')
 @include_timestamp
 def web_asset_store():
@@ -790,6 +679,7 @@ def web_asset_store():
     response.content_type = 'text/xml; charset=utf-8'
     return template('web_asset_store.xml', host="%s:%d" % (settings.SERVER_NAME, settings.SERVER_PORT),
                     protocol=settings.SERVER_PROTOCOL)
+
 
 @app.route('/robots.txt')
 @include_timestamp
@@ -804,6 +694,7 @@ def retrieve_robots_txt():
 def main_page():
     log("Hit root")
     return 'Specify attachment server'
+
 
 if __name__ == '__main__':
     from bottle import run
