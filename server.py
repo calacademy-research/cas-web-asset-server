@@ -237,8 +237,11 @@ def resolve_file(filename, collection, type, scale):
     convert(input_path, *convert_args, tmp_out)
 
     if USE_S3:
-        with open(tmp_out, 'rb') as f:
-            storage_save(rel_thumb, f)
+        try:
+            with open(tmp_out, 'rb') as f:
+                storage_save(rel_thumb, f)
+        finally:
+            remove_tempfile(tmp_out)
     else:
         final_path = os.path.join(settings.BASE_DIR, rel_thumb)
         os.replace(tmp_out, final_path)
@@ -356,6 +359,7 @@ def fileget():
             dn = quote(path.basename(download_name).encode('ascii', 'replace'))
             r.set_header('Content-Disposition', f"inline; filename*=utf-8''{dn}")
         log(f"Get complete (S3 via static_file): {request.query.filename}")
+        remove_tempfile(tmp_path)
         return r
 
     # fallback to local filesystem
@@ -592,17 +596,12 @@ def get_exif_metadata():
 
     try:
         tags = exif_instance.read_exif_tags()
-        log("STOP 2")
     except Exception as e:
         log(f"Error reading EXIF data: {e}")
         tags = {}
 
     if USE_S3:
-        try:
-            os.remove(local_path)
-            log("STOP 3")
-        except OSError:
-            pass
+        remove_tempfile(local_path)
 
     if datatype == 'date':
         try:
@@ -611,7 +610,6 @@ def get_exif_metadata():
             abort(404, 'DateTime not found in EXIF')
 
     response.content_type = 'application/json'
-    log("STOP 4")
     return json.dumps(tags, indent=4, sort_keys=True, default=json_datetime_handler)
 
 
@@ -655,9 +653,11 @@ def updateexifdata():
             log(f"exif_data is not a dictionary")
 
         if USE_S3:
-            with open(local_path, 'rb') as f:
-                storage_save(rel_path, f)
-            os.remove(local_path)
+            try:
+                with open(local_path, 'rb') as f:
+                    storage_save(rel_path, f)
+            finally:
+                remove_tempfile(local_path)
 
         return f"{storename} updated with new exif metadata"
 

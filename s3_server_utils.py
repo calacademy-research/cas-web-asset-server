@@ -4,7 +4,7 @@ import tempfile
 from functools import lru_cache
 from contextlib import contextmanager
 from os import path, makedirs, remove
-
+import logging
 import boto3
 from botocore.exceptions import ClientError
 from bottle import abort
@@ -100,11 +100,18 @@ def storage_tempfile(rel: str):
     try:
         yield tmp.name
     finally:
-        try:
-            os.remove(tmp.name)
-        except OSError:
-            pass
+        remove_tempfile(tmp.name)
 
+
+def remove_tempfile(tmp_path: str):
+    """
+    removes temp-files created by the storage download with exception
+    """
+    if os.path.exists(tmp_path):
+        try:
+            os.remove(tmp_path)
+        except OSError as e:
+            logging.warning(f"Could not delete {tmp_path}: {e}")
 
 def storage_download(rel: str) -> str:
     """

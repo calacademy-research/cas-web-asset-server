@@ -89,9 +89,6 @@ def test_web_asset_store():
     response = requests.get(build_url(endpoint))
     assert response.status_code == 200
     result = response.content.decode("utf-8")
-    print(body)
-    print("______________")
-    print(result)
     assert body == result
 
 
