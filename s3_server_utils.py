@@ -1,27 +1,33 @@
 # s3_server_utils.py
 import os
+import shutil
+import sys
 import tempfile
 from functools import lru_cache
 from contextlib import contextmanager
 from os import path, makedirs, remove
 import logging
+import socket
+from urllib.parse import urlparse
 import boto3
 from botocore.exceptions import ClientError
 from bottle import abort
+import time
+import settings
 
-import settings  # assumes settings.py is accessible
-
-
-# --- S3 configuration flags / environment ------------------------------------
-USE_S3 = os.getenv('USE_S3', 'false').lower() in ('1', 'true', 'yes')
-
-if USE_S3:
+if os.getenv('S3_ENDPOINT'):
     S3_ENDPOINT   = os.getenv('S3_ENDPOINT')
     S3_BUCKET     = os.getenv('S3_BUCKET')
     S3_ACCESS_KEY = os.getenv('S3_ACCESS_KEY')
     S3_SECRET_KEY = os.getenv('S3_SECRET_KEY')
     S3_URL_EXPIRY = int(os.getenv('S3_URL_EXPIRY', '3600'))
     S3_REGION     = os.getenv('S3_REGION')
+    TMP_FOLDER = "s3_temp"
+
+    if os.path.isdir(TMP_FOLDER):
+        # clearing out any temp undeleted temp files on startup
+        shutil.rmtree(TMP_FOLDER)
+    os.makedirs(TMP_FOLDER, exist_ok=True)
 else:
     # Provide defaults so attribute access does not fail when S3 disabled
     S3_ENDPOINT = S3_BUCKET = S3_ACCESS_KEY = S3_SECRET_KEY = S3_REGION = None
@@ -33,11 +39,10 @@ def s3_key(p: str) -> str:
     """Normalize a path into an S3 object key."""
     return p.lstrip('/')
 
-
 @lru_cache(maxsize=1)
 def get_s3():
     """Lazy-initialized singleton S3 client (only if USE_S3)."""
-    if not USE_S3:
+    if not S3_ENDPOINT:
         raise RuntimeError("S3 is not enabled")
     session = boto3.session.Session()
     s3 = session.client(
@@ -53,9 +58,16 @@ def get_s3():
     except ClientError as e:
         code = e.response['Error']['Code']
         if code in ('404', 'NoSuchBucket'):
-            s3.create_bucket(Bucket=S3_BUCKET)
+            try:
+                s3.create_bucket(Bucket=S3_BUCKET)
+                time.sleep(10)
+                s3.head_bucket(Bucket=S3_BUCKET)
+            except ClientError as e:
+                logging.critical(f"Bucket {S3_BUCKET} does not exist and could not be created.", e)
+                sys.exit()
         else:
-            raise
+            logging.critical(f"Bucket {S3_BUCKET} does not exist and could not be created.", e)
+            sys.exit()
     return s3
 
 
@@ -68,7 +80,7 @@ def storage_exists(rel: str) -> bool:
     local_path = os.path.join(settings.BASE_DIR, rel)
     if path.exists(local_path):
         return True
-    if USE_S3:
+    if S3_ENDPOINT:
         try:
             get_s3().head_object(Bucket=S3_BUCKET, Key=s3_key(rel))
             return True
@@ -83,7 +95,7 @@ def orig_location(rel: str) -> str:
     """
     Validate that the original exists (S3 mode) before returning rel key/path.
     """
-    if USE_S3 and not storage_exists(rel):
+    if S3_ENDPOINT and not storage_exists(rel):
         abort(404, f"Missing object: {rel}")
     return rel
 
@@ -91,22 +103,23 @@ def orig_location(rel: str) -> str:
 @contextmanager
 def storage_tempfile(rel: str):
     """
-    Context manager yielding a local temp filename with remote/S3 object
-    downloaded. File is removed afterward.
+    Yield a temp file path (under TMP_FOLDER) containing the downloaded S3 object.
+    File is deleted on exit.
     """
-    tmp = tempfile.NamedTemporaryFile(delete=False)
-    tmp.close()
-    get_s3().download_file(S3_BUCKET, s3_key(rel), tmp.name)
+    _, ext = os.path.splitext(rel)
+    fd, tmp_path = tempfile.mkstemp(dir=TMP_FOLDER, prefix="s3dl_", suffix=ext or "")
+    os.close(fd)
     try:
-        yield tmp.name
+        get_s3().download_file(S3_BUCKET, s3_key(rel), tmp_path)
+        yield tmp_path
     finally:
-        remove_tempfile(tmp.name)
-
+        remove_tempfile(tmp_path)
 
 def remove_tempfile(tmp_path: str):
     """
     removes temp-files created by the storage download with exception
     """
+    tmp_path = os.path.join(tmp_path)
     if os.path.exists(tmp_path):
         try:
             os.remove(tmp_path)
@@ -121,7 +134,7 @@ def storage_download(rel: str) -> str:
     local = path.join(settings.BASE_DIR, rel)
     if path.exists(local):
         return local
-    if USE_S3:
+    if S3_ENDPOINT:
         tmp = tempfile.NamedTemporaryFile(delete=False)
         tmp.close()
         get_s3().download_file(S3_BUCKET, s3_key(rel), tmp.name)
@@ -137,7 +150,7 @@ def storage_save(rel: str, file_object):
     local = path.join(settings.BASE_DIR, rel)
     local_dir = path.dirname(local)
     # If local mode OR destination directory already exists locally, save local
-    if path.isdir(local_dir) or not USE_S3:
+    if path.isdir(local_dir) or not S3_ENDPOINT:
         makedirs(local_dir, exist_ok=True)
         with open(local, 'wb') as o:
             o.write(file_object.read())
@@ -155,7 +168,7 @@ def storage_delete(rel: str):
     if path.exists(local):
         remove(local)
         return
-    if USE_S3:
+    if S3_ENDPOINT:
         get_s3().delete_object(Bucket=S3_BUCKET, Key=s3_key(rel))
         return
     abort(404)
@@ -169,7 +182,7 @@ def storage_url(rel: str):
     local = path.join(settings.BASE_DIR, rel)
     if path.exists(local):
         return None
-    if USE_S3:
+    if S3_ENDPOINT:
         return get_s3().generate_presigned_url(
             'get_object',
             Params={'Bucket': S3_BUCKET, 'Key': s3_key(rel)},

@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y \
 
 # Copy your main nginx.conf into the container
 COPY nginx.conf /etc/nginx/
+COPY views/robots.txt /srv/app/views/robots.txt
 
 # Download and install the Nginx Ultimate Bad Bot Blocker 'install-ngxblocker' script
 RUN wget https://raw.githubusercontent.com/mitchellkrogza/nginx-ultimate-bad-bot-blocker/master/install-ngxblocker \

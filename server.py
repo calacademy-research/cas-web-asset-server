@@ -217,7 +217,7 @@ def resolve_file(filename, collection, type, scale):
     scaled_name = f"{root}_{scale}{ext}"
     rel_thumb = os.path.join(relpath, scaled_name)
 
-    if USE_S3:
+    if S3_ENDPOINT:
         if storage_exists(rel_thumb):
             log("Serving previously scaled thumbnail from S3")
             return rel_thumb
@@ -229,7 +229,7 @@ def resolve_file(filename, collection, type, scale):
         basepath = os.path.join(settings.BASE_DIR, relpath)
         os.makedirs(basepath, exist_ok=True)
 
-    if USE_S3:
+    if S3_ENDPOINT:
         orig_key = os.path.join(get_rel_path(collection, False, storename), storename)
 
         if not storage_exists(orig_key):
@@ -252,7 +252,7 @@ def resolve_file(filename, collection, type, scale):
     tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix=ext).name
     convert(input_path, *convert_args, tmp_out)
 
-    if USE_S3:
+    if S3_ENDPOINT:
         try:
             with open(tmp_out, 'rb') as f:
                 storage_save(rel_thumb, f)
@@ -285,7 +285,7 @@ def static(path):
         log(f"Token required")
         return response
 
-    if USE_S3:
+    if S3_ENDPOINT:
         with storage_tempfile(path) as tmp_path:
             mime, _ = guess_type(filename)
             dirpath, fname = os.path.split(tmp_path)
@@ -373,7 +373,7 @@ def fileget():
         request.query.scale
     )
 
-    if USE_S3:
+    if S3_ENDPOINT:
         # pull down the object
         tmp_path = storage_download(resolved)
         dirpath, fname = path.split(tmp_path)
@@ -444,10 +444,10 @@ def fileupload():
     upload = list(request.files.values())[0]
     log(f"Saving upload: {upload}")
 
-    # gets replaced with check if USE_S3 is true
+    # gets replaced with check if S3_ENDPOINT is true
     s3_exists = False
     key = None
-    if USE_S3:
+    if S3_ENDPOINT:
         try:
             key = path.join(
                 get_rel_path(request.forms.coll, thumb_p, storename),
@@ -467,7 +467,7 @@ def fileupload():
         return response
 
     # Save the upload
-    if USE_S3 and key:
+    if S3_ENDPOINT and key:
         storage_save(key, upload.file)
     else:
         if not path.exists(basepath):
@@ -538,7 +538,7 @@ def filedelete():
     thumbpath = path.join(settings.BASE_DIR, get_rel_path(request.forms.coll, thumb_p=True, storename=storename))
     pathname = path.join(basepath, storename)
 
-    if USE_S3:
+    if S3_ENDPOINT:
         storage_delete(path.join(get_rel_path(request.forms.coll, False, storename), storename))
         pref = storename.split('.att')[0]
         resp = get_s3().list_objects_v2(Bucket=S3_BUCKET, Prefix=s3_key(path.join(get_rel_path(request.forms.coll,
@@ -611,7 +611,7 @@ def get_exif_metadata():
     basepath = path.join(settings.BASE_DIR, rel_path)
     pathname = path.join(basepath, storename)
     datatype = request.query.dt
-    if USE_S3:
+    if S3_ENDPOINT:
         key = path.join(rel_path, storename)
         if not storage_exists(key):
             abort(404, f"Missing object: {key}")
@@ -629,7 +629,7 @@ def get_exif_metadata():
         log(f"Error reading EXIF data: {e}")
         tags = {}
 
-    if USE_S3:
+    if S3_ENDPOINT:
         remove_tempfile(local_path)
 
     if datatype == 'date':
@@ -659,7 +659,7 @@ def updateexifdata():
         if not exif_data:
             abort(400)
 
-        if USE_S3:
+        if S3_ENDPOINT:
             if not storage_exists(rel_path):
                 abort(404, f"Missing object: {rel_path}")
             local_path = storage_download(rel_path)
@@ -681,7 +681,7 @@ def updateexifdata():
         else:
             log(f"exif_data is not a dictionary")
 
-        if USE_S3:
+        if S3_ENDPOINT:
             try:
                 with open(local_path, 'rb') as f:
                     storage_save(rel_path, f)
@@ -708,15 +708,6 @@ def web_asset_store():
     response.content_type = 'text/xml; charset=utf-8'
     return template('web_asset_store.xml', host="%s:%d" % (settings.SERVER_NAME, settings.SERVER_PORT),
                     protocol=settings.SERVER_PROTOCOL)
-
-
-@app.route('/robots.txt')
-@include_timestamp
-def retrieve_robots_txt():
-    """serve a txt file describing permitted bot and webcrawler access"""
-    response.content_type = 'text/plain; charset=utf-8'
-    root = os.path.join(os.path.dirname(__file__), 'views')
-    return static_file('robots.txt', root=root, mimetype='text/plain')
 
 
 @app.route('/')
