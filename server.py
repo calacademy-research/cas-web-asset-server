@@ -3,6 +3,8 @@
 import logging
 import os
 import shutil
+import time
+import tempfile
 from functools import wraps
 from glob import glob
 from mimetypes import guess_type
@@ -11,7 +13,6 @@ from urllib.parse import quote
 from urllib.request import pathname2url
 import hmac
 import json
-import time
 from collection_definitions import COLLECTION_DIRS
 from datetime import datetime
 from time import sleep
@@ -21,9 +22,12 @@ from bottle import Bottle
 from image_db import ImageDb
 from image_db import TIME_FORMAT
 from urllib.parse import unquote
-from s3_server_utils import *
+from s3_server_utils import S3Connection
 
 app = application = Bottle()
+
+# initializing s3 connection
+s3_conn = S3Connection()
 
 # Configure logging
 import settings
@@ -36,6 +40,7 @@ from bottle import (
     HTTPResponse)
 
 BaseRequest.MEMFILE_MAX = 300 * 1024 * 1024
+
 def get_image_db():
     image_db = ImageDb()
     return image_db
@@ -204,7 +209,7 @@ def resolve_file(filename, collection, type, scale):
     file_path = os.path.join(relpath, storename)
 
     if not thumb_p:
-        return orig_location(file_path)
+        return s3_conn.orig_location(file_path)
 
     scale = int(scale)
     mimetype, encoding = guess_type(storename)
@@ -217,8 +222,8 @@ def resolve_file(filename, collection, type, scale):
     scaled_name = f"{root}_{scale}{ext}"
     rel_thumb = os.path.join(relpath, scaled_name)
 
-    if S3_ENDPOINT:
-        if storage_exists(rel_thumb):
+    if s3_conn.S3_ENDPOINT:
+        if s3_conn.storage_exists(rel_thumb):
             log("Serving previously scaled thumbnail from S3")
             return rel_thumb
     else:
@@ -229,12 +234,12 @@ def resolve_file(filename, collection, type, scale):
         basepath = os.path.join(settings.BASE_DIR, relpath)
         os.makedirs(basepath, exist_ok=True)
 
-    if S3_ENDPOINT:
+    if s3_conn.S3_ENDPOINT:
         orig_key = os.path.join(get_rel_path(collection, False, storename), storename)
 
-        if not storage_exists(orig_key):
+        if not s3_conn.storage_exists(orig_key):
             abort(404, f"Missing object: {orig_key}")
-        input_path = storage_download(orig_key)
+        input_path = s3_conn.storage_download(orig_key)
     else:
         orig_dir = os.path.join(
             settings.BASE_DIR,
@@ -252,12 +257,12 @@ def resolve_file(filename, collection, type, scale):
     tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix=ext).name
     convert(input_path, *convert_args, tmp_out)
 
-    if S3_ENDPOINT:
+    if s3_conn.S3_ENDPOINT:
         try:
             with open(tmp_out, 'rb') as f:
-                storage_save(rel_thumb, f)
+                s3_conn.storage_save(rel_thumb, f)
         finally:
-            remove_tempfile(tmp_out)
+            s3_conn.remove_tempfile(tmp_out)
     else:
         final_path = os.path.join(settings.BASE_DIR, rel_thumb)
         # using shutil to account for mounted filesystem
@@ -285,8 +290,8 @@ def static(path):
         log(f"Token required")
         return response
 
-    if S3_ENDPOINT:
-        with storage_tempfile(path) as tmp_path:
+    if s3_conn.S3_ENDPOINT:
+        with s3_conn.storage_tempfile(path) as tmp_path:
             mime, _ = guess_type(filename)
             dirpath, fname = os.path.split(tmp_path)
             resp = static_file(fname, root=dirpath, mimetype=mime)
@@ -373,19 +378,12 @@ def fileget():
         request.query.scale
     )
 
-    if S3_ENDPOINT:
-        # pull down the object
-        tmp_path = storage_download(resolved)
-        dirpath, fname = path.split(tmp_path)
-
-        r = static_file(fname, root=dirpath, mimetype=None)
-        download_name = request.query.downloadname
-        if download_name:
-            download_name = quote(path.basename(download_name).encode('ascii', 'replace'))
-            r.set_header('Content-Disposition', f"inline; filename*=utf-8''{download_name}")
-        log(f"Get complete (S3 via static_file): {request.query.filename}")
-        remove_tempfile(tmp_path)
-        return r
+    if s3_conn.S3_ENDPOINT:
+        return s3_conn.s3_stream_response(
+            key=resolved,
+            filename_for_ct=request.query.filename,
+            downloadname=request.query.get('downloadname')
+        )
 
     # fallback to local filesystem
     r = static_file(resolved, root=settings.BASE_DIR)
@@ -444,16 +442,16 @@ def fileupload():
     upload = list(request.files.values())[0]
     log(f"Saving upload: {upload}")
 
-    # gets replaced with check if S3_ENDPOINT is true
+    # gets replaced with check if s3_conn.S3_ENDPOINT is true
     s3_exists = False
     key = None
-    if S3_ENDPOINT:
+    if s3_conn.S3_ENDPOINT:
         try:
             key = path.join(
                 get_rel_path(request.forms.coll, thumb_p, storename),
                 storename
             )
-            resp = get_s3().list_objects_v2(Bucket=S3_BUCKET, Prefix=key)
+            resp = s3_conn.get_s3().list_objects_v2(Bucket=s3_conn.S3_BUCKET, Prefix=key)
             s3_exists = bool(resp.get('Contents'))
         except Exception as e:
             log(f"S3 list_objects_v2 error: {e}")
@@ -467,8 +465,8 @@ def fileupload():
         return response
 
     # Save the upload
-    if S3_ENDPOINT and key:
-        storage_save(key, upload.file)
+    if s3_conn.S3_ENDPOINT and key:
+        s3_conn.storage_save(key, upload.file)
     else:
         if not path.exists(basepath):
             makedirs(basepath)
@@ -538,13 +536,14 @@ def filedelete():
     thumbpath = path.join(settings.BASE_DIR, get_rel_path(request.forms.coll, thumb_p=True, storename=storename))
     pathname = path.join(basepath, storename)
 
-    if S3_ENDPOINT:
-        storage_delete(path.join(get_rel_path(request.forms.coll, False, storename), storename))
+    if s3_conn.S3_ENDPOINT:
+        s3_conn.storage_delete(path.join(get_rel_path(request.forms.coll, False, storename), storename))
         pref = storename.split('.att')[0]
-        resp = get_s3().list_objects_v2(Bucket=S3_BUCKET, Prefix=s3_key(path.join(get_rel_path(request.forms.coll,
-                                                                        thumb_p=True, storename=storename), pref)))
+        resp = s3_conn.get_s3().list_objects_v2(Bucket=s3_conn.S3_BUCKET,
+                                                      Prefix=s3_conn.s3_key(path.join(get_rel_path(request.forms.coll,
+                                                      thumb_p=True, storename=storename), pref)))
         for obj in resp.get('Contents', []):
-            get_s3().delete_object(Bucket=S3_BUCKET, Key=obj['Key'])
+            s3_conn.get_s3().delete_object(Bucket=s3_conn.S3_BUCKET, Key=obj['Key'])
     else:
         if not path.exists(pathname):
             abort(404)
@@ -611,11 +610,11 @@ def get_exif_metadata():
     basepath = path.join(settings.BASE_DIR, rel_path)
     pathname = path.join(basepath, storename)
     datatype = request.query.dt
-    if S3_ENDPOINT:
+    if s3_conn.S3_ENDPOINT:
         key = path.join(rel_path, storename)
-        if not storage_exists(key):
+        if not s3_conn.storage_exists(key):
             abort(404, f"Missing object: {key}")
-        local_path = storage_download(key)
+        local_path = s3_conn.storage_download(key)
     else:
         local_path = pathname
         if not os.path.exists(local_path):
@@ -629,8 +628,8 @@ def get_exif_metadata():
         log(f"Error reading EXIF data: {e}")
         tags = {}
 
-    if S3_ENDPOINT:
-        remove_tempfile(local_path)
+    if s3_conn.S3_ENDPOINT:
+        s3_conn.remove_tempfile(local_path)
 
     if datatype == 'date':
         try:
@@ -659,10 +658,10 @@ def updateexifdata():
         if not exif_data:
             abort(400)
 
-        if S3_ENDPOINT:
-            if not storage_exists(rel_path):
+        if s3_conn.S3_ENDPOINT:
+            if not s3_conn.storage_exists(rel_path):
                 abort(404, f"Missing object: {rel_path}")
-            local_path = storage_download(rel_path)
+            local_path = s3_conn.storage_download(rel_path)
         else:
             local_path = os.path.join(settings.BASE_DIR, rel_path)
             if not os.path.exists(local_path):
@@ -681,12 +680,12 @@ def updateexifdata():
         else:
             log(f"exif_data is not a dictionary")
 
-        if S3_ENDPOINT:
+        if s3_conn.S3_ENDPOINT:
             try:
                 with open(local_path, 'rb') as f:
-                    storage_save(rel_path, f)
+                    s3_conn.storage_save(rel_path, f)
             finally:
-                remove_tempfile(local_path)
+                s3_conn.remove_tempfile(local_path)
 
         return f"{storename} updated with new exif metadata"
 
