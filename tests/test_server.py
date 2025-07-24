@@ -83,8 +83,8 @@ def test_web_asset_store():
     <url type="delete"><![CDATA[{settings.SERVER_PROTOCOL}://{settings.SERVER_NAME}:{settings.SERVER_PORT}/filedelete]]></url>
     <url type="getexifdata"><![CDATA[{settings.SERVER_PROTOCOL}://{settings.SERVER_NAME}:{settings.SERVER_PORT}/getexifdata]]></url>
     <url type="testkey">{settings.SERVER_PROTOCOL}://{settings.SERVER_NAME}:{settings.SERVER_PORT}/testkey</url>
-</urls>
-"""
+</urls>"""
+
     endpoint = "web_asset_store.xml"
     response = requests.get(build_url(endpoint))
     assert response.status_code == 200

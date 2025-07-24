@@ -1,0 +1,36 @@
+# disallowing all bots and webcrawlers
+
+User-agent: *
+Disallow: /
+
+## exceptions
+
+# www.cch2.org
+User-agent: *www.cch2.org*
+Allow: /
+
+# bryophyteportal.org
+User-agent: *bryophyteportal.org*
+Allow: /
+
+# lichenportal.org
+User-agent: *lichenportal.org*
+Allow: /
+
+# library.big‑bee.net
+User-agent: *library.big‑bee.net*
+Allow: /
+
+# GBIF API crawler
+User-agent: *api.gbif.org*
+Allow: /
+
+# GBIF scientific‑collections
+User-agent: *scientific‑collections.gbif.org*
+Allow: /
+
+# Thumbor v7.4.7 from Danmarks Tekniske Universitet
+User-agent: *Thumbor/7.4.7*
+Allow: /
+
+

@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 
 import logging
+import os
+import shutil
+import time
+import tempfile
 from functools import wraps
 from glob import glob
 from mimetypes import guess_type
@@ -9,7 +13,6 @@ from urllib.parse import quote
 from urllib.request import pathname2url
 import hmac
 import json
-import time
 from collection_definitions import COLLECTION_DIRS
 from datetime import datetime
 from time import sleep
@@ -19,15 +22,18 @@ from bottle import Bottle
 from image_db import ImageDb
 from image_db import TIME_FORMAT
 from urllib.parse import unquote
+from s3_server_utils import S3Connection
 
 app = application = Bottle()
+
+# initializing s3 connection
+s3_conn = S3Connection()
 
 # Configure logging
 import settings
 
 level = logging.getLevelName(settings.LOG_LEVEL)
 logging.basicConfig(filename='app.log', level=level)
-
 
 from bottle import (
     Response, BaseRequest, request, response, static_file, template, abort,
@@ -39,8 +45,10 @@ def get_image_db():
     image_db = ImageDb()
     return image_db
 
+
 def log(msg):
     logging.debug(msg)
+
 
 def get_rel_path(coll, thumb_p, storename):
     """Return originals or thumbnails subdirectory of the main
@@ -57,14 +65,10 @@ def get_rel_path(coll, thumb_p, storename):
     except KeyError:
         err = f"Unknown collection: {coll}"
         log(err)
-        # response.content_type = 'text/plain; charset=utf-8'
-        # response.status = 403
-        # response.text = err
-        # log (err)
-        # return response
         abort(404, "Unknown collection: %r" % coll)
 
     return path.join(coll_dir, type_dir, first_subdir, second_subdir)
+
 
 def str2bool(value, raise_exc=False):
     """converts diverse string values into boolean True or False,
@@ -84,10 +88,9 @@ def str2bool(value, raise_exc=False):
     return None
 
 
-
 def generate_token(timestamp, filename):
     """Generate the auth token for the given filename and timestamp.
-    This is for comparing to the client submited token.
+    This is for comparing to the client submitted token.
     """
     timestamp = str(timestamp)
     if timestamp is None:
@@ -138,20 +141,15 @@ def validate_token(token_in, filename):
     log(f"Valid token: {token_in} time: {timestr}")
 
 
-
 def require_token(filename_param, always=False):
     """Decorate a view function to require an auth token to be present for access.
-
     filename_param defines the field in the request that contains the filename
     against which the token should validate.
-
     If REQUIRE_KEY_FOR_GET is False, validation will be skipped for GET and HEAD
     requests.
-
     Automatically adds the X-Timestamp header to responses to help clients stay
     syncronized.
     """
-
     def decorator(func):
         @include_timestamp
         @wraps(func)
@@ -167,30 +165,25 @@ def require_token(filename_param, always=False):
                     log(response.body)
                     return response
             return func(*args, **kwargs)
-
         return wrapper
-
     return decorator
 
 
 def include_timestamp(func):
     """Decorate a view function to include the X-Timestamp header to help clients
-    maintain time syncronization.
+    maintain time synchronization.
     """
-
     @wraps(func)
     def wrapper(*args, **kwargs):
         result = func(*args, **kwargs)
         (result if isinstance(result, Response) else response) \
             .set_header('X-Timestamp', str(get_timestamp()))
         return result
-
     return wrapper
 
 
 def allow_cross_origin(func):
     """Decorate a view function to allow cross domain access."""
-
     @wraps(func)
     def wrapper(*args, **kwargs):
         try:
@@ -198,11 +191,9 @@ def allow_cross_origin(func):
         except HTTPResponse as r:
             r.set_header('Access-Control-Allow-Origin', '*')
             raise
-
         (result if isinstance(result, Response) else response) \
             .set_header('Access-Control-Allow-Origin', '*')
         return result
-
     return wrapper
 
 
@@ -212,58 +203,72 @@ def resolve_file(filename, collection, type, scale):
     so before returning accession_copy.
     Returns the relative path to the requested file in the base attachments directory.
     """
-
     thumb_p = (type == "T")
     storename = filename
-
     relpath = get_rel_path(collection, thumb_p, storename)
+    file_path = os.path.join(relpath, storename)
 
     if not thumb_p:
-        return path.join(relpath, storename)
+        return s3_conn.orig_location(file_path)
+
     scale = int(scale)
-    basepath = path.join(settings.BASE_DIR, relpath)
-
     mimetype, encoding = guess_type(storename)
-
     assert mimetype in settings.CAN_THUMBNAIL
 
-    root, ext = path.splitext(storename)
-
+    root, ext = os.path.splitext(storename)
     if mimetype in ('application/pdf', 'image/tiff'):
-        # use PNG for PDF thumbnails
         ext = '.png'
 
-    scaled_name = "%s_%d%s" % (root, scale, ext)
-    scaled_pathname = path.join(basepath, scaled_name)
+    scaled_name = f"{root}_{scale}{ext}"
+    rel_thumb = os.path.join(relpath, scaled_name)
 
-    if path.exists(scaled_pathname):
-        log("Serving previously scaled thumbnail")
-        return path.join(relpath, scaled_name)
+    if s3_conn.S3_ENDPOINT:
+        if s3_conn.storage_exists(rel_thumb):
+            log("Serving previously scaled thumbnail from S3")
+            return rel_thumb
+    else:
+        local_thumb = os.path.join(settings.BASE_DIR, rel_thumb)
+        if os.path.exists(local_thumb):
+            log("Serving previously scaled thumbnail")
+            return rel_thumb
+        basepath = os.path.join(settings.BASE_DIR, relpath)
+        os.makedirs(basepath, exist_ok=True)
 
-    if not path.exists(basepath):
-        try:
-            makedirs(basepath, exist_ok=True)
-        except FileExistsError:
-            pass
+    if s3_conn.S3_ENDPOINT:
+        orig_key = os.path.join(get_rel_path(collection, False, storename), storename)
 
+        if not s3_conn.storage_exists(orig_key):
+            abort(404, f"Missing object: {orig_key}")
+        input_path = s3_conn.storage_download(orig_key)
+    else:
+        orig_dir = os.path.join(
+            settings.BASE_DIR,
+            get_rel_path(collection, False, storename)
+        )
+        input_path = os.path.join(orig_dir, storename)
+        if not os.path.exists(input_path):
+            abort(404, f"Missing original: {input_path}")
 
-    orig_dir = path.join(settings.BASE_DIR, get_rel_path(request.query.coll, thumb_p=False, storename=storename))
-    orig_path = path.join(orig_dir, storename)
-
-    if not path.exists(orig_path):
-        abort(404, "Missing original: %s" % orig_path)
-
-    input_spec = orig_path
-    convert_args = ('-resize', "%dx%d>" % (scale, scale))
+    convert_args = ['-resize', f"{scale}x{scale}>"]
     if mimetype == 'application/pdf':
-        input_spec += '[0]'  # only thumbnail first page of PDF
-        convert_args += ('-background', 'white', '-flatten')  # add white background to PDFs
+        input_path += '[0]'
+        convert_args.extend(['-background', 'white', '-flatten'])
 
-    log("Scaling thumbnail to %d" % scale)
-    convert(input_spec, *(convert_args + (scaled_pathname,)))
+    tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix=ext).name
+    convert(input_path, *convert_args, tmp_out)
 
-    return path.join(relpath, scaled_name)
+    if s3_conn.S3_ENDPOINT:
+        try:
+            with open(tmp_out, 'rb') as f:
+                s3_conn.storage_save(rel_thumb, f)
+        finally:
+            s3_conn.remove_tempfile(tmp_out)
+    else:
+        final_path = os.path.join(settings.BASE_DIR, rel_thumb)
+        # using shutil to account for mounted filesystem
+        shutil.move(tmp_out, final_path)
 
+    return rel_thumb
 
 
 @app.route('/static/<path:path>')
@@ -272,7 +277,7 @@ def static(path):
     if not settings.ALLOW_STATIC_FILE_ACCESS:
         abort(404)
     filename = path.split('/')[-1]
-    image_db=get_image_db()
+    image_db = get_image_db()
     records = image_db.get_image_record_by_internal_filename(filename)
     if len(records) < 1:
         log(f"Static record not found: {request.query.filename}")
@@ -285,6 +290,14 @@ def static(path):
         log(f"Token required")
         return response
 
+    if s3_conn.S3_ENDPOINT:
+        with s3_conn.storage_tempfile(path) as tmp_path:
+            mime, _ = guess_type(filename)
+            dirpath, fname = os.path.split(tmp_path)
+            resp = static_file(fname, root=dirpath, mimetype=mime)
+            resp.set_header('Content-Disposition', f'inline; filename="{filename}"')
+            return resp
+
     return static_file(path, root=settings.BASE_DIR)
 
 
@@ -296,7 +309,7 @@ def getFileUrl(filename, collection, file_type, scale, override_url=False):
             file_type: file, jpg, tif, pdf
             scale: the scale to save the file or image. 0 is original size.
             override_url: used override the sever name variable for a custom public server name
-    """
+     """
     if override_url:
         server_name = f"{settings.PUBLIC_SERVER}:{settings.PUBLIC_SERVER_PORT}"
         protocol = settings.PUBLIC_SERVER_PROTOCOL
@@ -304,16 +317,11 @@ def getFileUrl(filename, collection, file_type, scale, override_url=False):
         server_name = f"{settings.SERVER_NAME}:{settings.SERVER_PORT}" if settings.OVERRIDE_PORT else settings.SERVER_NAME
         protocol = settings.SERVER_PROTOCOL
 
-    log('%s://%s/static/%s' % (protocol,
-                               server_name,
-                               pathname2url(resolve_file(filename, collection, file_type, scale))
-                                ))
-
-    return '%s://%s/static/%s' % (protocol,
-                                  server_name,
-                                  pathname2url(resolve_file(filename, collection, file_type, scale))
-                                  )
-
+    return '%s://%s/static/%s' % (
+        protocol,
+        server_name,
+        pathname2url(resolve_file(filename, collection, file_type, scale))
+    )
 
 
 @app.route('/getfileref')
@@ -324,14 +332,13 @@ def getfileref():
         log("static file access denied")
         abort(404)
     response.content_type = 'text/plain; charset=utf-8'
-    log(f"{getFileUrl(request.query.filename,request.query.coll,request.query['type'],request.query.scale, settings.INTERNAL)}")
-
-    return getFileUrl(request.query.filename,
-                      request.query.coll,
-                      request.query['type'],
-                      request.query.scale,
-                      settings.INTERNAL)
-
+    return getFileUrl(
+        request.query.filename,
+        request.query.coll,
+        request.query['type'],
+        request.query.scale,
+        settings.INTERNAL
+    )
 
 
 @app.route('/fileget')
@@ -339,16 +346,17 @@ def getfileref():
 def fileget():
     """Returns the file data of the file indicated by the query parameters."""
     log(f"fileget {request.query.filename}")
-    image_db=get_image_db()
+    image_db = get_image_db()
     records = image_db.get_image_record_by_internal_filename(request.query.filename)
-    log(f"Fileget complete")
+    log("Fileget complete")
     if len(records) < 1:
         log(f"Record not found: {request.query.filename}")
         response.content_type = 'text/plain; charset=utf-8'
         response.status = 404
         return response
+
     if records[0]['redacted']:
-        log(f"Redacted, check auth token")
+        log("Redacted, check auth token")
         try:
             # Note, we're hitting this twice with the @require_token decorator
             validate_token(request.query.token, request.query.filename)
@@ -358,22 +366,32 @@ def fileget():
             response.body = f"403 - forbidden. Invalid token: '{request.query.token}'"
             log(response.body)
             return response
-        log(f"Token validated for redacted record...")
+        log("Token validated for redacted record...")
     else:
-        log(f"Not redacted, no check required")
-    log(f"Valid request: {request.query.filename}")
+        log("Not redacted, no check required")
 
-    resolved_file = resolve_file(request.query.filename,
-                                 request.query.coll,
-                                 request.query['type'],
-                                 request.query.scale)
-    r = static_file(resolved_file,
-                    root=settings.BASE_DIR)
+    log(f"Valid request: {request.query.filename}")
+    resolved = resolve_file(
+        request.query.filename,
+        request.query.coll,
+        request.query['type'],
+        request.query.scale
+    )
+
+    if s3_conn.S3_ENDPOINT:
+        return s3_conn.s3_stream_response(
+            key=resolved,
+            filename_for_ct=request.query.filename,
+            downloadname=request.query.get('downloadname')
+        )
+
+    # fallback to local filesystem
+    r = static_file(resolved, root=settings.BASE_DIR)
     download_name = request.query.downloadname
     if download_name:
-        download_name = quote(path.basename(download_name).encode('ascii', 'replace'))
-        r.set_header('Content-Disposition', "inline; filename*=utf-8''%s" % download_name)
-    log(f"Get complete:{request.query.filename}")
+        dn = quote(path.basename(download_name).encode('ascii','replace'))
+        r.set_header('Content-Disposition', f"inline; filename*=utf-8''{dn}")
+    log(f"Get complete (FS): {request.query.filename}")
     return r
 
 
@@ -382,6 +400,7 @@ def fileget():
 def fileupload_options():
     response.content_type = "text/plain; charset=utf-8"
     return ''
+
 
 @app.route('/fileupload', method='POST')
 @allow_cross_origin
@@ -392,13 +411,16 @@ def fileupload():
     """
     image_db = get_image_db()
     start_save = time.time()
-    log(f"Post request for fileupload...")
+    log("Post request for fileupload...")
     thumb_p = (request.forms['type'] == "T")
     storename = request.forms.store
-    basepath = path.join(settings.BASE_DIR, get_rel_path(request.forms.coll, thumb_p, storename))
-
+    basepath = path.join(
+        settings.BASE_DIR,
+        get_rel_path(request.forms.coll, thumb_p, storename)
+    )
     pathname = path.join(basepath, storename)
 
+    # Basic validation
     if len(storename) < 7:
         log(f"Name too short: {storename}")
         response.content_type = 'text/plain; charset=utf-8'
@@ -406,27 +428,51 @@ def fileupload():
         return response
     if thumb_p:
         return 'Ignoring thumbnail upload!'
-    if 'original_path' in request.forms.keys():
-        response_list = image_db.get_image_record_by_original_path(original_path=request.forms['original_path'],
-                                                                   collection=request.forms.coll, exact=True)
+
+    # Check for duplicates by original_path in DB
+    if 'original_path' in request.forms:
+        response_list = image_db.get_image_record_by_original_path(
+            original_path=request.forms['original_path'],
+            collection=request.forms.coll,
+            exact=True
+        )
     else:
         response_list = []
 
     upload = list(request.files.values())[0]
-
     log(f"Saving upload: {upload}")
 
-    if path.isfile(pathname) or len(response_list) > 0:
-        log("Duplicate file; return failure:")
+    # gets replaced with check if s3_conn.S3_ENDPOINT is true
+    s3_exists = False
+    key = None
+    if s3_conn.S3_ENDPOINT:
+        try:
+            key = path.join(
+                get_rel_path(request.forms.coll, thumb_p, storename),
+                storename
+            )
+            resp = s3_conn.get_s3().list_objects_v2(Bucket=s3_conn.S3_BUCKET, Prefix=key)
+            s3_exists = bool(resp.get('Contents'))
+        except Exception as e:
+            log(f"S3 list_objects_v2 error: {e}")
+            abort(500, f"S3 error: {e}")
+
+    # Unified duplicate check
+    if s3_exists or path.isfile(pathname) or len(response_list) > 0:
+        log("Duplicate file detected; returning 409")
         response.content_type = 'text/plain; charset=utf-8'
         response.status = 409
-        return response.status
+        return response
 
-    if not path.exists(basepath):
-        makedirs(basepath)
+    # Save the upload
+    if s3_conn.S3_ENDPOINT and key:
+        s3_conn.storage_save(key, upload.file)
+    else:
+        if not path.exists(basepath):
+            makedirs(basepath)
+        upload.save(pathname, overwrite=True)
 
-    upload.save(pathname, overwrite=True)
-
+    # Prepare metadata for DB record
     response.content_type = 'text/plain; charset=utf-8'
     original_filename = None
     original_path = None
@@ -434,33 +480,38 @@ def fileupload():
     redacted = False
     orig_md5 = None
     datetime_now = datetime.utcnow()
-    if 'original_filename' in request.forms.keys():
+
+    if 'original_filename' in request.forms:
         log("original filename field set")
         original_filename = request.forms['original_filename']
     else:
         notes = f"uploaded manually through specify portal at {datetime_now}"
         log("original filename field is not set")
-    if 'original_path' in request.forms.keys():
+
+    if 'original_path' in request.forms:
         original_path = request.forms['original_path']
-    if 'notes' in request.forms.keys():
+    if 'notes' in request.forms:
         notes = request.forms['notes']
-    if 'redacted' in request.forms.keys():
+    if 'redacted' in request.forms:
         redacted = str2bool(request.forms['redacted'])
-    if 'datetime' in request.forms.keys():
+    if 'datetime' in request.forms:
         datetime_now = datetime.strptime(request.forms['datetime'], TIME_FORMAT)
-    if 'orig_md5' in request.forms.keys():
+    if 'orig_md5' in request.forms:
         orig_md5 = request.forms['orig_md5']
 
+    # Create the DB record
     try:
-        image_db.create_image_record(original_filename,
-                                     getFileUrl(storename, request.forms.coll, 'file', 0, settings.INTERNAL),
-                                     storename,
-                                     request.forms.coll,
-                                     original_path,
-                                     notes,
-                                     redacted,
-                                     datetime_now,
-                                     orig_md5)
+        image_db.create_image_record(
+            original_filename,
+            getFileUrl(storename, request.forms.coll, 'file', 0, settings.INTERNAL),
+            storename,
+            request.forms.coll,
+            original_path,
+            notes,
+            redacted,
+            datetime_now,
+            orig_md5
+        )
     except Exception as ex:
         print(f"Unexpected error: {ex}")
         abort(500, f'Unexpected error: {ex}')
@@ -483,22 +534,27 @@ def filedelete():
 
     basepath = path.join(settings.BASE_DIR, get_rel_path(request.forms.coll, thumb_p=False, storename=storename))
     thumbpath = path.join(settings.BASE_DIR, get_rel_path(request.forms.coll, thumb_p=True, storename=storename))
-
     pathname = path.join(basepath, storename)
 
-    if not path.exists(pathname):
-        abort(404)
-
-    log("Deleting %s" % pathname)
-    remove(pathname)
-
-    prefix = storename.split('.att')[0]
-    base_filename = prefix[0:prefix.rfind('.')]
-    pattern = path.join(thumbpath, base_filename + '*' + prefix[prefix.rfind('.') + 1:])
-
-    log("Deleting thumbnails matching %s" % pattern)
-    for name in glob(pattern):
-        remove(name)
+    if s3_conn.S3_ENDPOINT:
+        s3_conn.storage_delete(path.join(get_rel_path(request.forms.coll, False, storename), storename))
+        pref = storename.split('.att')[0]
+        resp = s3_conn.get_s3().list_objects_v2(Bucket=s3_conn.S3_BUCKET,
+                                                      Prefix=s3_conn.s3_key(path.join(get_rel_path(request.forms.coll,
+                                                      thumb_p=True, storename=storename), pref)))
+        for obj in resp.get('Contents', []):
+            s3_conn.get_s3().delete_object(Bucket=s3_conn.S3_BUCKET, Key=obj['Key'])
+    else:
+        if not path.exists(pathname):
+            abort(404)
+        log("Deleting %s" % pathname)
+        remove(pathname)
+        prefix = storename.split('.att')[0]
+        base_filename = prefix[0:prefix.rfind('.')]
+        pattern = path.join(thumbpath, base_filename + '*' + prefix[prefix.rfind('.') + 1:])
+        log("Deleting thumbnails matching %s" % pattern)
+        for name in glob(pattern):
+            remove(name)
 
     response.content_type = 'text/plain; charset=utf-8'
     image_db.delete_image_record(storename)
@@ -510,9 +566,7 @@ def json_datetime_handler(x):
         return x.strftime(TIME_FORMAT)
     raise TypeError("Unknown type")
 
-# file_string can be md5 of the original file, (search_type=md5)
-# the full file path or, (search_type=path)
-# the filename. (search_type=filename) default if param omitted
+
 @app.route('/getImageRecord')
 @require_token('file_string', always=True)
 def get_image_record():
@@ -552,19 +606,30 @@ def get_image_record():
 def get_exif_metadata():
     """Provides access to EXIF metadata."""
     storename = request.query.filename
-    basepath = path.join(settings.BASE_DIR, get_rel_path(request.query.coll, thumb_p=False, storename=storename))
+    rel_path = get_rel_path(request.query.coll, thumb_p=False, storename=storename)
+    basepath = path.join(settings.BASE_DIR, rel_path)
     pathname = path.join(basepath, storename)
     datatype = request.query.dt
-    if not path.exists(pathname):
-        abort(404)
+    if s3_conn.S3_ENDPOINT:
+        key = path.join(rel_path, storename)
+        if not s3_conn.storage_exists(key):
+            abort(404, f"Missing object: {key}")
+        local_path = s3_conn.storage_download(key)
+    else:
+        local_path = pathname
+        if not os.path.exists(local_path):
+            abort(404, f"Missing file: {local_path}")
 
-    exif_instance = MetadataTools(pathname)
+    exif_instance = MetadataTools(local_path)
+
     try:
         tags = exif_instance.read_exif_tags()
-
     except Exception as e:
         log(f"Error reading EXIF data: {e}")
         tags = {}
+
+    if s3_conn.S3_ENDPOINT:
+        s3_conn.remove_tempfile(local_path)
 
     if datatype == 'date':
         try:
@@ -573,7 +638,6 @@ def get_exif_metadata():
             abort(404, 'DateTime not found in EXIF')
 
     response.content_type = 'application/json'
-
     return json.dumps(tags, indent=4, sort_keys=True, default=json_datetime_handler)
 
 
@@ -584,20 +648,27 @@ def updateexifdata():
     storename = request.forms.filename
     exif_data = request.forms.exif_dict
     exif_data = json.loads(exif_data)
-    base_root = path.join(settings.BASE_DIR, get_rel_path(request.forms.coll, thumb_p=False, storename=storename))
-    thumb_root = path.join(settings.BASE_DIR, get_rel_path(request.forms.coll, thumb_p=True, storename=storename))
+    base_root = path.join(get_rel_path(request.forms.coll, thumb_p=False, storename=storename))
+    thumb_root = path.join(get_rel_path(request.forms.coll, thumb_p=True, storename=storename))
     orig_path = path.join(base_root, storename)
     thumb_path = path.join(thumb_root, storename)
     path_list = [orig_path, thumb_path]
     for rel_path in path_list:
-        if not path.exists(rel_path):
-            abort(404)
 
         if not exif_data:
             abort(400)
 
+        if s3_conn.S3_ENDPOINT:
+            if not s3_conn.storage_exists(rel_path):
+                abort(404, f"Missing object: {rel_path}")
+            local_path = s3_conn.storage_download(rel_path)
+        else:
+            local_path = os.path.join(settings.BASE_DIR, rel_path)
+            if not os.path.exists(local_path):
+                abort(404, f"Missing file: {local_path}")
+
         if isinstance(exif_data, dict):
-            md = MetadataTools(path=rel_path)
+            md = MetadataTools(path=local_path)
             try:
                 md.write_exif_tags(exif_dict=exif_data)
             except:
@@ -608,6 +679,13 @@ def updateexifdata():
                 return response
         else:
             log(f"exif_data is not a dictionary")
+
+        if s3_conn.S3_ENDPOINT:
+            try:
+                with open(local_path, 'rb') as f:
+                    s3_conn.storage_save(rel_path, f)
+            finally:
+                s3_conn.remove_tempfile(local_path)
 
         return f"{storename} updated with new exif metadata"
 
@@ -629,6 +707,7 @@ def web_asset_store():
     response.content_type = 'text/xml; charset=utf-8'
     return template('web_asset_store.xml', host="%s:%d" % (settings.SERVER_NAME, settings.SERVER_PORT),
                     protocol=settings.SERVER_PROTOCOL)
+
 
 @app.route('/')
 def main_page():
@@ -653,6 +732,6 @@ if __name__ == '__main__':
         server=settings.SERVER,
         debug=settings.DEBUG_APP,
         reloader=settings.DEBUG_APP
-        )
+    )
 
     log("Exiting.")
