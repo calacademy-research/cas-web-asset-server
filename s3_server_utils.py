@@ -10,12 +10,14 @@ from os import path, makedirs, remove
 import logging
 from mimetypes import guess_type
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, EndpointConnectionError, ConnectionClosedError, ReadTimeoutError
 from urllib.parse import quote
 from bottle import HTTPResponse
 from bottle import abort
 import time
+from functools import wraps
 import settings
+
 
 
 
@@ -40,7 +42,34 @@ class S3Connection():
             self.S3_URL_EXPIRY = 0
             self.S3_PREFIX = ''
         self.chunk_size = 64 * 1024
+        self._s3 = None
         self.make_temp_folder()
+
+    @staticmethod
+    def retry_s3_call():
+        """
+        Retry decorator for S3 operations with progressive backoff and infinite retries after 60s.
+        """
+
+        def decorator(func):
+            @wraps(func)
+            def wrapper(*args, **kwargs):
+                delay = 0
+                attempt = 0
+                while True:
+                    try:
+                        return func(*args, **kwargs)
+                    except (ClientError, EndpointConnectionError, ConnectionClosedError, ReadTimeoutError) as e:
+                        attempt += 1
+                        logging.warning(
+                            f"[{func.__name__}] Attempt {attempt} failed: {type(e).__name__}: {e}. Retrying in {delay}s..."
+                        )
+                        time.sleep(delay)
+                        delay = min(delay + 10, 60)
+
+            return wrapper
+
+        return decorator
 
     def make_temp_folder(self):
         """creates and cleans out folder for storage of temp images"""
@@ -58,39 +87,40 @@ class S3Connection():
         """Normalize a path into an S3 object key."""
         return p.lstrip('/')
 
-    @lru_cache(maxsize=1)
+
+    @retry_s3_call()
     def get_s3(self):
         """Lazy-initialized singleton S3 client (only if USE_S3)."""
         if not self.S3_ENDPOINT:
             raise RuntimeError("S3 is not enabled")
-        session = boto3.session.Session()
-        s3 = session.client(
-            's3',
-            endpoint_url=self.S3_ENDPOINT,
-            aws_access_key_id=self.S3_ACCESS_KEY,
-            aws_secret_access_key=self.S3_SECRET_KEY,
-            region_name=self.S3_REGION
-        )
-        # Ensure bucket exists
-        try:
-            s3.head_bucket(Bucket=self.S3_BUCKET)
-        except ClientError as e:
-            code = e.response['Error']['Code']
-            if code in ('404', 'NoSuchBucket'):
-                try:
-                    s3.create_bucket(Bucket=self.S3_BUCKET)
-                    time.sleep(10)
-                    s3.head_bucket(Bucket=self.S3_BUCKET)
-                except ClientError as e:
+        if not hasattr(self, "_s3") or self._s3 is None:
+            session = boto3.session.Session()
+            self._s3 = session.client(
+                's3',
+                endpoint_url=self.S3_ENDPOINT,
+                aws_access_key_id=self.S3_ACCESS_KEY,
+                aws_secret_access_key=self.S3_SECRET_KEY,
+                region_name=self.S3_REGION
+            )
+            # Ensure bucket exists
+            try:
+                self._s3.head_bucket(Bucket=self.S3_BUCKET)
+            except ClientError as e:
+                code = e.response['Error']['Code']
+                if code in ('404', 'NoSuchBucket'):
+                    try:
+                        self._s3.create_bucket(Bucket=self.S3_BUCKET)
+                        time.sleep(10)
+                        self._s3.head_bucket(Bucket=self.S3_BUCKET)
+                    except ClientError as e:
+                        logging.critical(f"Bucket {self.S3_BUCKET} does not exist and could not be created.", e)
+                        raise
+                else:
                     logging.critical(f"Bucket {self.S3_BUCKET} does not exist and could not be created.", e)
-                    sys.exit()
-            else:
-                logging.critical(f"Bucket {self.S3_BUCKET} does not exist and could not be created.", e)
-                sys.exit()
-        return s3
+                    raise
+            return self._s3
 
-
-    # --- Public storage abstraction API ------------------------------------------
+    @retry_s3_call()
     def storage_exists(self, rel: str) -> bool:
         """
         Check if object exists locally or in S3.
@@ -108,7 +138,7 @@ class S3Connection():
 
         return False
 
-
+    @retry_s3_call()
     def orig_location(self, rel: str) -> str:
         """
         Validate that the original exists (S3 mode) before returning rel key/path.
@@ -117,7 +147,7 @@ class S3Connection():
             abort(404, f"Missing object: {rel}")
         return rel
 
-
+    @retry_s3_call()
     @contextmanager
     def storage_tempfile(self, rel: str):
         """
@@ -134,6 +164,7 @@ class S3Connection():
         finally:
             self.remove_tempfile(tmp_path)
 
+    @retry_s3_call()
     def remove_tempfile(self, tmp_path: str):
         """
         removes temp-files created by the storage download with exception
@@ -145,6 +176,7 @@ class S3Connection():
             except OSError as e:
                 logging.warning(f"Could not delete {tmp_path}: {e}")
 
+    @retry_s3_call()
     def storage_download(self, rel: str) -> str:
         """
         Return a local file path to the given relative key/path. If local file
@@ -160,7 +192,7 @@ class S3Connection():
 
         abort(404)
 
-
+    @retry_s3_call()
     def storage_save(self, rel: str, file_object):
         """
         Save file data either to local filesystem or S3.
@@ -170,7 +202,7 @@ class S3Connection():
         file_object.seek(0)
         self.get_s3().put_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key), Body=file_object.read())
 
-
+    @retry_s3_call()
     def storage_delete(self, rel: str):
         """
         Delete the object referenced by rel from local filesystem or S3.
@@ -182,7 +214,7 @@ class S3Connection():
             return
         abort(404)
 
-
+    @retry_s3_call()
     def storage_url(self, rel: str):
         """
         Generate a pre-signed URL for an S3 object if running in S3 mode. Returns None otherwise
@@ -196,8 +228,7 @@ class S3Connection():
             )
         return None
 
-
-
+    @retry_s3_call()
     def stream(self, body):
         """loads the stream by iterating through the file body by chunk size"""
         try:
@@ -206,6 +237,7 @@ class S3Connection():
         finally:
             body.close()
 
+    @retry_s3_call()
     def s3_stream_response(self, key, downloadname=None, filename_for_ct=None):
         """streams s3 response, allowing for no static storage usage."""
         full_key = f"{self.S3_PREFIX}/{key}".lstrip("/")
