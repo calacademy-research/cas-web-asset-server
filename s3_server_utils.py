@@ -118,7 +118,7 @@ class S3Connection():
                 else:
                     logging.critical(f"Bucket {self.S3_BUCKET} does not exist and could not be created.", e)
                     raise
-            return self._s3
+        return self._s3
 
     @retry_s3_call()
     def storage_exists(self, rel: str) -> bool:
