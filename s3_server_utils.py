@@ -18,9 +18,6 @@ import time
 from functools import wraps
 import settings
 
-
-
-
 class S3Connection():
     def __init__(self):
 
@@ -34,7 +31,6 @@ class S3Connection():
             self.S3_SECRET_KEY = os.getenv('S3_SECRET_KEY')
             self.S3_URL_EXPIRY = int(os.getenv('S3_URL_EXPIRY', '3600'))
             self.S3_REGION     = os.getenv('S3_REGION')
-
             self.TMP_FOLDER = "s3_temp"
         else:
             # Provide defaults so attribute access does not fail when S3 disabled
@@ -72,15 +68,22 @@ class S3Connection():
         return decorator
 
     def make_temp_folder(self):
-        """creates and cleans out folder for storage of temp images"""
+        """creates and cleans out folder for storage of temp images. Only removes files older than
+        s3 url max lifetime to avoid race conditions with multithreaded applications
+        """
         os.makedirs(self.TMP_FOLDER, exist_ok=True)
-
+        now = time.time()
+        max_lifetime = int(self.S3_URL_EXPIRY)
         for name in os.listdir(self.TMP_FOLDER):
-            path = os.path.join(self.TMP_FOLDER, name)
-            if os.path.isdir(path):
-                shutil.rmtree(path)
-            else:
-                os.remove(path)
+            rm_path = os.path.join(self.TMP_FOLDER, name)
+            try:
+                age = now - os.path.getmtime(rm_path)
+                if age <= max_lifetime:
+                    continue
+                remover = shutil.rmtree if os.path.isdir(rm_path) else os.remove
+                remover(rm_path)
+            except Exception as e:
+                logging.warning(f"Could not remove temp item: {path} — {e}")
 
 # --- Internal helpers ---------------------------------------------------------
     def s3_key(self, p: str) -> str:
