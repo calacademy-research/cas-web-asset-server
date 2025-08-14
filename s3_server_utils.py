@@ -25,7 +25,6 @@ import weakref
 class S3Connection():
     def __init__(self):
         mount_path = '/code/attachments'
-
         if os.getenv('S3_ENDPOINT') and not os.path.ismount(mount_path):
             self.S3_ENDPOINT   = os.getenv('S3_ENDPOINT')
             self.S3_BUCKET     = os.getenv('S3_BUCKET')
@@ -34,7 +33,7 @@ class S3Connection():
             self.S3_SECRET_KEY = os.getenv('S3_SECRET_KEY')
             self.S3_URL_EXPIRY = int(os.getenv('S3_URL_EXPIRY', '3600'))
             self.S3_REGION     = os.getenv('S3_REGION')
-
+            self.cleanup_temp_folder()
             unique_id = f"{os.getpid()}-{threading.get_ident()}-{uuid.uuid4()}"
             self.TMP_FOLDER = path.join("s3_temp", unique_id)
             os.makedirs(self.TMP_FOLDER, exist_ok=True)
@@ -43,6 +42,7 @@ class S3Connection():
             self.S3_ENDPOINT = self.S3_BUCKET = self.S3_ACCESS_KEY = self.S3_SECRET_KEY = self.S3_REGION = None
             self.S3_URL_EXPIRY = 0
             self.S3_PREFIX = ''
+            self.cleanup_temp_folder()
 
         self.chunk_size = 64 * 1024
         self._s3 = None
@@ -75,26 +75,35 @@ class S3Connection():
 
         return decorator
 
-
     def cleanup_temp_folder(self):
-        """Remove this instance's TMP_FOLDER entirely."""
+        """Remove this instance's TMP_FOLDER and stale s3_temp folders safely."""
         try:
-            if os.path.isdir(self.TMP_FOLDER):
+            if hasattr(self, 'TMP_FOLDER') and os.path.isdir(self.TMP_FOLDER):
                 shutil.rmtree(self.TMP_FOLDER)
-                logging.info(f"Cleaned up temp folder: {self.TMP_FOLDER}")
-            now = time.time()
-            # older than double the s3 url expiry time
-            max_age = 2 * int(self.S3_URL_EXPIRY)
-            for name in os.listdir("s3_temp"):
-                full_path = os.path.join("s3_temp", name)
-                age = now - os.path.getmtime(full_path)
-                if age <= max_age:
-                    continue
-                remover = shutil.rmtree if os.path.isdir(full_path) else os.remove
-                remover(full_path)
-
+                logging.info(f"Cleaned up own temp folder: {self.TMP_FOLDER}")
         except Exception as e:
-            logging.warning(f"Failed to clean temp folder {self.TMP_FOLDER}: {e}")
+            logging.warning(f"Failed to clean own TMP_FOLDER: {e}")
+        try:
+            base_folder = "s3_temp"
+            now = time.time()
+            max_age = 2 * int(getattr(self, 'S3_URL_EXPIRY', 3600))
+
+            if os.path.isdir(base_folder):
+                for name in os.listdir(base_folder):
+                    full_path = os.path.join(base_folder, name)
+                    if full_path == getattr(self, 'TMP_FOLDER', None):
+                        continue
+                    try:
+                        age = now - os.path.getmtime(full_path)
+                        if age > max_age and os.path.isdir(full_path):
+                            shutil.rmtree(full_path)
+                            logging.info(f"Cleaned old temp folder: {full_path}")
+                    except FileNotFoundError:
+                        continue
+                    except Exception as e:
+                        logging.warning(f"Could not clean temp folder {full_path}: {e}")
+        except Exception as e:
+            logging.warning(f"Global cleanup failed: {e}")
 
 
     def s3_key(self, p: str) -> str:
