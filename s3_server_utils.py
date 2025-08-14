@@ -4,6 +4,7 @@ import os
 import shutil
 import sys
 import tempfile
+import uuid
 from functools import lru_cache
 from contextlib import contextmanager
 from os import path, makedirs, remove
@@ -17,15 +18,13 @@ from bottle import abort
 import time
 from functools import wraps
 import settings
-
-
-
+import threading
+import atexit
+import weakref
 
 class S3Connection():
     def __init__(self):
-
         mount_path = '/code/attachments'
-
         if os.getenv('S3_ENDPOINT') and not os.path.ismount(mount_path):
             self.S3_ENDPOINT   = os.getenv('S3_ENDPOINT')
             self.S3_BUCKET     = os.getenv('S3_BUCKET')
@@ -34,16 +33,21 @@ class S3Connection():
             self.S3_SECRET_KEY = os.getenv('S3_SECRET_KEY')
             self.S3_URL_EXPIRY = int(os.getenv('S3_URL_EXPIRY', '3600'))
             self.S3_REGION     = os.getenv('S3_REGION')
+            self.cleanup_temp_folder()
+            unique_id = f"{os.getpid()}-{threading.get_ident()}-{uuid.uuid4()}"
+            self.TMP_FOLDER = path.join("s3_temp", unique_id)
+            os.makedirs(self.TMP_FOLDER, exist_ok=True)
 
-            self.TMP_FOLDER = "s3_temp"
         else:
-            # Provide defaults so attribute access does not fail when S3 disabled
             self.S3_ENDPOINT = self.S3_BUCKET = self.S3_ACCESS_KEY = self.S3_SECRET_KEY = self.S3_REGION = None
             self.S3_URL_EXPIRY = 0
             self.S3_PREFIX = ''
+            self.cleanup_temp_folder()
+
         self.chunk_size = 64 * 1024
         self._s3 = None
-        self.make_temp_folder()
+        atexit.register(self.cleanup_temp_folder)
+        weakref.finalize(self, self.cleanup_temp_folder)
 
     @staticmethod
     def retry_s3_call():
@@ -71,18 +75,37 @@ class S3Connection():
 
         return decorator
 
-    def make_temp_folder(self):
-        """creates and cleans out folder for storage of temp images"""
-        os.makedirs(self.TMP_FOLDER, exist_ok=True)
+    def cleanup_temp_folder(self):
+        """Remove this instance's TMP_FOLDER and stale s3_temp folders safely."""
+        try:
+            if hasattr(self, 'TMP_FOLDER') and os.path.isdir(self.TMP_FOLDER):
+                shutil.rmtree(self.TMP_FOLDER)
+                logging.info(f"Cleaned up own temp folder: {self.TMP_FOLDER}")
+        except Exception as e:
+            logging.warning(f"Failed to clean own TMP_FOLDER: {e}")
+        try:
+            base_folder = "s3_temp"
+            now = time.time()
+            max_age = 2 * int(getattr(self, 'S3_URL_EXPIRY', 3600))
 
-        for name in os.listdir(self.TMP_FOLDER):
-            path = os.path.join(self.TMP_FOLDER, name)
-            if os.path.isdir(path):
-                shutil.rmtree(path)
-            else:
-                os.remove(path)
+            if os.path.isdir(base_folder):
+                for name in os.listdir(base_folder):
+                    full_path = os.path.join(base_folder, name)
+                    if full_path == getattr(self, 'TMP_FOLDER', None):
+                        continue
+                    try:
+                        age = now - os.path.getmtime(full_path)
+                        if age > max_age and os.path.isdir(full_path):
+                            shutil.rmtree(full_path)
+                            logging.info(f"Cleaned old temp folder: {full_path}")
+                    except FileNotFoundError:
+                        continue
+                    except Exception as e:
+                        logging.warning(f"Could not clean temp folder {full_path}: {e}")
+        except Exception as e:
+            logging.warning(f"Global cleanup failed: {e}")
 
-# --- Internal helpers ---------------------------------------------------------
+
     def s3_key(self, p: str) -> str:
         """Normalize a path into an S3 object key."""
         return p.lstrip('/')
