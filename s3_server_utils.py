@@ -12,6 +12,7 @@ import logging
 from mimetypes import guess_type
 import boto3
 from botocore.exceptions import ClientError, EndpointConnectionError, ConnectionClosedError, ReadTimeoutError
+from botocore.config import Config
 from urllib.parse import quote
 from bottle import HTTPResponse
 from bottle import abort
@@ -123,7 +124,16 @@ class S3Connection():
                 endpoint_url=self.S3_ENDPOINT,
                 aws_access_key_id=self.S3_ACCESS_KEY,
                 aws_secret_access_key=self.S3_SECRET_KEY,
-                region_name=self.S3_REGION
+                region_name=self.S3_REGION,
+                config=Config(
+                    max_pool_connections=64,
+                    retries={'max_attempts': 10, 'mode': 'adaptive'},
+                    connect_timeout=3,
+                    read_timeout=600,
+                    tcp_keepalive=True,
+                    signature_version='s3v4',
+                    s3={'use_dualstack_endpoint': True}  # optional; helpful if you want IPv6
+                )
             )
             # Ensure bucket exists
             try:
@@ -203,7 +213,8 @@ class S3Connection():
     def storage_download(self, rel: str) -> str:
         """
         downloads from S3 to a temp file and returns the local path.
-        Caller is responsible for deleting the file (use remove_tempfile).
+        Caller is responsible for deleting tmp the file after successful execution
+        to allow for resizing operations
         """
         full_key = f"{self.S3_PREFIX}/{rel}".lstrip("/")
         _, ext = os.path.splitext(rel)
