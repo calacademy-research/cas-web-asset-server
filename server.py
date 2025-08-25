@@ -239,7 +239,25 @@ def resolve_file(filename, collection, type, scale):
 
         if not s3_conn.storage_exists(orig_key):
             abort(404, f"Missing object: {orig_key}")
-        input_path = s3_conn.storage_download(orig_key)
+
+        # Context-managed download ensures the temp file is deleted after use
+        with s3_conn.storage_tempfile(orig_key) as input_path:
+            convert_args = ['-resize', f"{scale}x{scale}>"]
+            convert_input = input_path
+            if mimetype == 'application/pdf':
+                convert_input = f"{input_path}[0]"
+                convert_args.extend(['-background', 'white', '-flatten'])
+
+            tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix=ext).name
+            convert(convert_input, *convert_args, tmp_out)
+
+            try:
+                with open(tmp_out, 'rb') as f:
+                    s3_conn.storage_save(rel_thumb, f)
+            finally:
+                s3_conn.remove_tempfile(tmp_out)
+
+        return rel_thumb
     else:
         orig_dir = os.path.join(
             settings.BASE_DIR,
@@ -257,19 +275,11 @@ def resolve_file(filename, collection, type, scale):
     tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix=ext).name
     convert(input_path, *convert_args, tmp_out)
 
-    if s3_conn.S3_ENDPOINT:
-        try:
-            with open(tmp_out, 'rb') as f:
-                s3_conn.storage_save(rel_thumb, f)
-        finally:
-            s3_conn.remove_tempfile(tmp_out)
-    else:
-        final_path = os.path.join(settings.BASE_DIR, rel_thumb)
-        # using shutil to account for mounted filesystem
-        shutil.move(tmp_out, final_path)
+    final_path = os.path.join(settings.BASE_DIR, rel_thumb)
+    # using shutil to account for mounted filesystem
+    shutil.move(tmp_out, final_path)
 
     return rel_thumb
-
 
 @app.route('/static/<path:path>')
 def static(path):
