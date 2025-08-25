@@ -202,18 +202,20 @@ class S3Connection():
     @retry_s3_call()
     def storage_download(self, rel: str) -> str:
         """
-        Return a local file path to the given relative key/path. If local file
-        exists, returns it; otherwise downloads from S3 to a temp file.
+        downloads from S3 to a temp file and returns the local path.
+        Caller is responsible for deleting the file (use remove_tempfile).
         """
         full_key = f"{self.S3_PREFIX}/{rel}".lstrip("/")
+        _, ext = os.path.splitext(rel)
+        fd, tmp_path = tempfile.mkstemp(dir=self.TMP_FOLDER, prefix="s3dl_", suffix=ext or "")
+        os.close(fd)
 
-        if self.S3_ENDPOINT:
-            tmp = tempfile.NamedTemporaryFile(delete=False)
-            tmp.close()
-            self.get_s3().download_file(self.S3_BUCKET, self.s3_key(full_key), tmp.name)
-            return tmp.name
-
-        abort(404)
+        try:
+            self.get_s3().download_file(self.S3_BUCKET, self.s3_key(full_key), tmp_path)
+            return tmp_path
+        except Exception:
+            self.remove_tempfile(tmp_path)
+            raise
 
     @retry_s3_call()
     def storage_save(self, rel: str, file_object):
