@@ -22,8 +22,10 @@ import settings
 import threading
 import atexit
 import weakref
+import posixpath
 
-class S3Connection():
+
+class S3Connection:
     def __init__(self):
         mount_path = '/code/attachments'
         if os.getenv('S3_ENDPOINT') and not os.path.ismount(mount_path):
@@ -50,6 +52,26 @@ class S3Connection():
         atexit.register(self.cleanup_temp_folder)
         weakref.finalize(self, self.cleanup_temp_folder)
 
+
+    @staticmethod
+    def not_found_client_error(e: ClientError) -> bool:
+        try:
+            status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            code = str(e.response.get("Error", {}).get("Code", "")).strip()
+        except Exception:
+            return False
+
+        return (
+            status == 404
+            or code in {
+                "404",
+                "NoSuchKey",
+                "NotFound",
+                "NoSuchObject",
+                "NoSuchVersion",
+            }
+        )
+
     @staticmethod
     def retry_s3_call():
         """
@@ -64,10 +86,25 @@ class S3Connection():
                 while True:
                     try:
                         return func(*args, **kwargs)
-                    except (ClientError, EndpointConnectionError, ConnectionClosedError, ReadTimeoutError) as e:
+
+                    except ClientError as e:
+                        if S3Connection.not_found_client_error(e):
+                            msg = e.response.get("Error", {}).get("Message") or "Not Found"
+                            abort(404, msg)
+
                         attempt += 1
                         logging.warning(
-                            f"[{func.__name__}] Attempt {attempt} failed: {type(e).__name__}: {e}. Retrying in {delay}s..."
+                            f"[{func.__name__}] Attempt {attempt} failed: {type(e).__name__}: {e}. "
+                            f"Retrying in {delay}s..."
+                        )
+                        time.sleep(delay)
+                        delay = min(delay + 10, 60)
+
+                    except (EndpointConnectionError, ConnectionClosedError, ReadTimeoutError) as e:
+                        attempt += 1
+                        logging.warning(
+                            f"[{func.__name__}] Attempt {attempt} failed: {type(e).__name__}: {e}. "
+                            f"Retrying in {delay}s..."
                         )
                         time.sleep(delay)
                         delay = min(delay + 10, 60)
@@ -153,13 +190,19 @@ class S3Connection():
                     raise
         return self._s3
 
+    def s3_full_key(self, rel: str) -> str:
+        """uses posixpath to create full key to avoid double slashes"""
+        rel = (rel or "").lstrip("/")
+        prefix = (self.S3_PREFIX or "").strip("/")
+        return posixpath.join(prefix, rel) if prefix else rel
+
     @retry_s3_call()
     def storage_exists(self, rel: str) -> bool:
         """
         Check if object exists locally or in S3.
         rel: relative path/key (no base directory).
         """
-        full_key = f"{self.S3_PREFIX}/{rel}".lstrip("/")
+        full_key = self.s3_full_key(rel)
         if self.S3_ENDPOINT:
             try:
                 self.get_s3().head_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
@@ -187,7 +230,7 @@ class S3Connection():
         Yield a temp file path (under TMP_FOLDER) containing the downloaded S3 object.
         File is deleted on exit.
         """
-        full_key = f"{self.S3_PREFIX}/{rel}".lstrip("/")
+        full_key = self.s3_full_key(rel)
         _, ext = os.path.splitext(rel)
         fd, tmp_path = tempfile.mkstemp(dir=self.TMP_FOLDER, prefix="s3dl_", suffix=ext or "")
         os.close(fd)
@@ -216,7 +259,7 @@ class S3Connection():
         Caller is responsible for deleting tmp the file after successful execution
         to allow for resizing operations
         """
-        full_key = f"{self.S3_PREFIX}/{rel}".lstrip("/")
+        full_key = self.s3_full_key(rel)
         _, ext = os.path.splitext(rel)
         fd, tmp_path = tempfile.mkstemp(dir=self.TMP_FOLDER, prefix="s3dl_", suffix=ext or "")
         os.close(fd)
@@ -234,7 +277,7 @@ class S3Connection():
         Save file data either to local filesystem or S3.
         file_object must be a file-like object.
         """
-        full_key = f"{self.S3_PREFIX}/{rel}".lstrip("/")
+        full_key = self.s3_full_key(rel)
         file_object.seek(0)
         self.get_s3().put_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key), Body=file_object.read())
 
@@ -243,7 +286,7 @@ class S3Connection():
         """
         Delete the object referenced by rel from local filesystem or S3.
         """
-        full_key = f"{self.S3_PREFIX}/{rel}".lstrip("/")
+        full_key = self.s3_full_key(rel)
 
         if self.S3_ENDPOINT:
             self.get_s3().delete_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
@@ -255,7 +298,7 @@ class S3Connection():
         """
         Generate a pre-signed URL for an S3 object if running in S3 mode. Returns None otherwise
         """
-        full_key = f"{self.S3_PREFIX}/{rel}".lstrip("/")
+        full_key = self.s3_full_key(rel)
         if self.S3_ENDPOINT:
             return self.get_s3().generate_presigned_url(
                 'get_object',
@@ -274,9 +317,9 @@ class S3Connection():
             body.close()
 
     @retry_s3_call()
-    def s3_stream_response(self, key, downloadname=None, filename_for_ct=None):
+    def s3_stream_response(self, rel, downloadname=None, filename_for_ct=None):
         """streams s3 response, allowing for no static storage usage."""
-        full_key = f"{self.S3_PREFIX}/{key}".lstrip("/")
+        full_key = self.s3_full_key(rel)
         s3 = self.get_s3()
         head = s3.head_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
         obj = s3.get_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
