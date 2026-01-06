@@ -390,7 +390,7 @@ def fileget():
 
     if s3_conn.S3_ENDPOINT:
         return s3_conn.s3_stream_response(
-            key=resolved,
+            rel=resolved,
             filename_for_ct=request.query.filename,
             downloadname=request.query.get('downloadname')
         )
