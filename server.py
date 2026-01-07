@@ -3,6 +3,7 @@
 import logging
 import os
 import shutil
+import sys
 import time
 import tempfile
 from functools import wraps
@@ -33,7 +34,7 @@ s3_conn = S3Connection()
 import settings
 
 level = logging.getLevelName(settings.LOG_LEVEL)
-logging.basicConfig(filename='app.log', level=level)
+logging.basicConfig(stream=sys.stdout, level=level)
 
 from bottle import (
     Response, BaseRequest, request, response, static_file, template, abort,
