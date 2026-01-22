@@ -6,10 +6,14 @@
 
 COLLECTION_DIRS = {
     # 'COLLECTION_NAME': 'DIRECTORY_NAME',
+    'casbotany': 'botany',
     'Botany': 'botany',
     'KUFishtissue': 'ichthyology_tissue',
     'Ichthyology': 'ichthyology',
+    'casich': 'ichthyology',
     'Invertebrate Zoology': 'iz',
     'IZ': 'iz',
+    'casiz': 'iz',
     'Botany_PIC': 'PIC_upload'
 }
+

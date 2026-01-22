@@ -8,8 +8,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     wget \
     cron \
-    libpcre3 \
-    libpcre3-dev \
+    libpcre2-8-0 \
+    libpcre2-dev \
+    bind9-dnsutils \
+    ca-certificates \
     dnsutils \
     && apt-get clean
 
