@@ -1,0 +1,7 @@
+# Requirements for pregen package
+boto3>=1.26.0
+Pillow>=9.0.0
+
+# Development/testing dependencies
+pytest>=7.0.0
+pytest-cov>=4.0.0
