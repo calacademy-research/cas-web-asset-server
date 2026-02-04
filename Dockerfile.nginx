@@ -8,10 +8,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     wget \
     cron \
-    libpcre2-8-0 \
-    libpcre2-dev \
-    bind9-dnsutils \
-    ca-certificates \
     dnsutils \
     && apt-get clean
 
@@ -36,7 +32,7 @@ RUN wget https://raw.githubusercontent.com/mitchellkrogza/nginx-ultimate-bad-bot
  && chmod +x /usr/local/sbin/update-ngxblocker
 
 # run any updates to botblocker
-RUN /usr/local/sbin/update-ngxblocker -c /etc/nginx/conf.d -b /etc/nginx/b
+RUN /usr/local/sbin/update-ngxblocker -c /etc/nginx/conf.d -b /etc/nginx/bots.d
 
 RUN /usr/local/openresty/bin/opm get openresty/lua-resty-string
 
