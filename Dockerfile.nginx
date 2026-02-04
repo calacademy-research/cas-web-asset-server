@@ -41,3 +41,6 @@ RUN /usr/local/sbin/update-ngxblocker -c /etc/nginx/conf.d -b /etc/nginx/b
 RUN /usr/local/openresty/bin/opm get openresty/lua-resty-string
 
 COPY /lua/s3_sign.lua /usr/local/openresty/nginx/lua/s3_sign.lua
+
+# (Optional) Add a crontab job to periodically update the blocker
+RUN echo "00 22 * * * /usr/local/sbin/update-ngxblocker -e youremail@email.org" >> /etc/crontab
