@@ -1,3 +1,5 @@
+version: '3.4'
+
 services:
 
   nginx:
@@ -8,15 +10,36 @@ services:
     ports:
       - '80:80'
       - '443:443'
+    environment:
+      # Used by deploy/nginx-openresty/lua/s3_sign.lua (OpenResty -> MinIO signing)
+      - S3_ENDPOINT=https://gateway.org:9000
+      - S3_BUCKET=your_bucket
+      - S3_PREFIX=your_folder
+      - S3_ACCESS_KEY=your_key
+      - S3_SECRET_KEY=secret_key
+      - S3_REGION=us-east-1
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf
+      - ./lua/s3_sign.lua:/usr/local/openresty/nginx/lua/s3_sign.lua:ro
+      - ./nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
+      - ./keys/wildcard_calacademy_org.key:/etc/ssl/private/wildcard_calacademy_org.key:ro
+      - ./keys/wildcard_calacademy_org.pem:/etc/ssl/certs/wildcard_calacademy_org.pem:ro
+
+      # Expose logs directory for promtail to read (REAL files, not stdout/stderr symlinks)
+      - nginx-logs:/var/log/nginx
     depends_on:
       - image-server
+    command: >
+      /bin/sh -c '
+      rm -f /var/log/nginx/access.log /var/log/nginx/error.log;
+      touch /var/log/nginx/access.log /var/log/nginx/error.log;
+      chmod 666 /var/log/nginx/access.log /var/log/nginx/error.log;
+      nginx -g "daemon off;"
+      '
     logging:
       driver: "json-file"
       options:
-        max-size: "1m"
-        max-file: "5"
+        max-size: "50m"
+        max-file: "10"
     restart: always
 
   image-server:
@@ -25,39 +48,92 @@ services:
       dockerfile: Dockerfile.server
     container_name: image-server
     environment:
-      - EXTERNAL_IP=institution.org
+      - EXTERNAL_IP=ip_local
       - PYTHONUNBUFFERED=1
       - LANG=C.UTF-8
       # MinIO / S3 settings, comment out if not using
-      #- S3_ENDPOINT=https://your_url
-      #- S3_BUCKET=bucket_name
-      #- S3_PREFIX=path/to/bucket/folder
-      #- S3_ACCESS_KEY=ACCESS_KEY
-      #- S3_SECRET_KEY=YOUR_SECRET_KEY
-      #- S3_URL_EXPIRY=3600
-      #- S3_REGION=us-east-1
+      - S3_ENDPOINT=https://localhost.org:9000
+      - S3_BUCKET=your_bucket
+      - S3_PREFIX=your_prefix
+      - S3_ACCESS_KEY=your_key
+      - S3_SECRET_KEY=secret_key
+      - S3_URL_EXPIRY=3600
+      - S3_REGION=us-east-1
     volumes:
       - ./:/code
-      # comment out if enabling S3 above
-      - /path/to/external/attachments/mount:/code/attachments
     command: ['uwsgi', '--plugin', '/usr/lib/uwsgi/plugins/python312_plugin.so','--ini', 'uwsgi.ini']
-
     restart: always
 
-  mysql-images:
-    restart: unless-stopped
-    image: mysql:8
-    container_name: mysql-images
-    ulimits:
-      stack: 8388608 #linux default for one thread, adjust and eval for multithreading
-    volumes:
-      - ./data:/var/lib/mysql:delegated
-      - ./mysql.cnf:/etc/mysql/conf.d/my.cnf
-    environment:
-      MYSQL_ROOT_PASSWORD: 'redacted'
-      MYSQL_DATABASE: 'images'
-      TZ: America/Los_Angeles
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: loki
     ports:
-      - "3306:3306"
-    expose:
-      - 3306
+      - "3100:3100"
+    volumes:
+      - ./monitoring/loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  promtail:
+    image: grafana/promtail:2.9.4
+    container_name: promtail
+    volumes:
+      - ./monitoring/promtail-config.yaml:/etc/promtail/config.yaml:ro
+      - nginx-logs:/var/log/nginx:ro
+      - promtail-positions:/tmp
+    command: -config.file=/etc/promtail/config.yaml
+    depends_on:
+      - loki
+      - nginx
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  grafana:
+    image: grafana/grafana:10.3.1
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=password
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_PROTOCOL=https
+      - GF_SERVER_HTTP_PORT=3000
+      - GF_SERVER_DOMAIN=localhost.org
+      - GF_SERVER_ROOT_URL=https://localhost.org:3000
+      - GF_SERVER_CERT_FILE=/etc/grafana/certs/wildcard_calacademy_org.pem
+      - GF_SERVER_CERT_KEY=/etc/grafana/certs/wildcard_calacademy_org.key
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./keys/wildcard_calacademy_org.pem:/etc/grafana/certs/wildcard_calacademy_org.pem:ro
+      - ./keys/wildcard_calacademy_org.key:/etc/grafana/certs/wildcard_calacademy_org.key:ro
+    depends_on:
+      - loki
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  nginx-logs:
+    driver: local
+  loki-data:
+    driver: local
+  promtail-positions:
+    driver: local
+  grafana-data:
+    driver: local

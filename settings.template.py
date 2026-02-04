@@ -100,3 +100,7 @@ SQL_PASSWORD='redacted'
 SQL_HOST='http://instutution.org'
 SQL_PORT=3306
 SQL_DATABASE='images'
+
+#open resty settings
+NGINX_S3_ACCEL = True
+NGINX_S3_ACCEL_PREFIX = "/_s3_internal"
