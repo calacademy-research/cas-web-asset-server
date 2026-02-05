@@ -40,9 +40,14 @@ from bottle import (
 
 BaseRequest.MEMFILE_MAX = 300 * 1024 * 1024
 
+# Singleton ImageDb instance - pool handles connections
+_image_db = None
+
 def get_image_db():
-    image_db = ImageDb()
-    return image_db
+    global _image_db
+    if _image_db is None:
+        _image_db = ImageDb()
+    return _image_db
 
 
 def log(msg):
