@@ -152,6 +152,35 @@ class ImageDb():
         finally:
             cnx.close()
 
+        # Create indexes if they don't exist
+        indexes = [
+            ('idx_internal_filename', 'internal_filename', None),
+            ('idx_orig_md5', 'orig_md5', None),
+            ('idx_collection', 'collection', None),
+            ('idx_original_filename', 'original_filename', 255),  # prefix index for large varchar
+        ]
+
+        cnx = _get_pool().get_connection()
+        try:
+            cursor = cnx.cursor(buffered=True)
+            for index_name, column_name, prefix_length in indexes:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM information_schema.statistics "
+                    "WHERE table_schema = DATABASE() AND table_name = 'images' AND index_name = %s",
+                    (index_name,))
+                index_exists = cursor.fetchone()[0]
+
+                if not index_exists:
+                    if prefix_length:
+                        sql = f"CREATE INDEX {index_name} ON images({column_name}({prefix_length}))"
+                    else:
+                        sql = f"CREATE INDEX {index_name} ON images({column_name})"
+                    self.log(f"Creating index: {sql}")
+                    cursor.execute(sql)
+            cursor.close()
+        finally:
+            cnx.close()
+
     def create_image_record(self,
                             original_filename,
                             url,
