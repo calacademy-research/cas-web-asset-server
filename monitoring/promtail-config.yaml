@@ -1,0 +1,69 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: nginx_access
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: nginx
+          host: ibss-images
+          log_type: access
+          __path__: /var/log/nginx/access.log
+
+    pipeline_stages:
+      - json:
+          expressions:
+            time_local: time_local
+            remote_addr: remote_addr
+            remote_user: remote_user
+            request: request
+            status: status
+            body_bytes_sent: body_bytes_sent
+            request_time: request_time
+            http_referer: http_referer
+            http_user_agent: http_user_agent
+            http_x_forwarded_for: http_x_forwarded_for
+            upstream_response_time: upstream_response_time
+            upstream_addr: upstream_addr
+            request_method: request_method
+            request_uri: request_uri
+            server_protocol: server_protocol
+
+      - labels:
+          status:
+          request_method:
+          remote_addr:
+
+      - timestamp:
+          source: time_local
+          format: "02/Jan/2006:15:04:05 -0700"
+
+  - job_name: nginx_error
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: nginx
+          host: ibss-images
+          log_type: error
+          __path__: /var/log/nginx/error.log
+
+    pipeline_stages:
+      - regex:
+          expression: '^(?P<timestamp>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) \[(?P<level>\w+)\] (?P<pid>\d+)#(?P<tid>\d+): (?:\*(?P<cid>\d+) )?(?P<message>.*)$'
+      
+      - labels:
+          level:
+
+      - timestamp:
+          source: timestamp
+          format: "2006/01/02 15:04:05"

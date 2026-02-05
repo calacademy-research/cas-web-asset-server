@@ -1,7 +1,7 @@
-# Use the latest official Nginx image as the base
-FROM nginx:latest
+# Use OpenResty (Nginx + Lua) on Ubuntu 24.04 (noble) as the base
+FROM openresty/openresty:noble
 
-# (Optional) to avoid interactive prompts in some distros:
+# to avoid interactive prompts in some distros:
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install any additional packages you need (cron, wget, etc.)
@@ -34,10 +34,9 @@ RUN wget https://raw.githubusercontent.com/mitchellkrogza/nginx-ultimate-bad-bot
 # run any updates to botblocker
 RUN /usr/local/sbin/update-ngxblocker -c /etc/nginx/conf.d -b /etc/nginx/bots.d
 
-# adding custom whitelists to botblocker
-COPY botblocker-settings/whitelist-domains.conf botblocker-settings/whitelist-ips.conf botblocker-settings/blacklist-user-agents.conf /etc/nginx/bots.d/
+RUN /usr/local/openresty/bin/opm get openresty/lua-resty-string
+
+COPY /lua/s3_sign.lua /usr/local/openresty/nginx/lua/s3_sign.lua
 
 # (Optional) Add a crontab job to periodically update the blocker
 RUN echo "00 22 * * * /usr/local/sbin/update-ngxblocker -e youremail@email.org" >> /etc/crontab
-
-# Expose NGINX ports

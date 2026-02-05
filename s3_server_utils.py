@@ -318,8 +318,34 @@ class S3Connection:
 
     @retry_s3_call()
     def s3_stream_response(self, rel, downloadname=None, filename_for_ct=None):
-        """streams s3 response, allowing for no static storage usage."""
+        """Return a Bottle response for an S3 object.
+
+        If settings.NGINX_S3_ACCEL is True:
+          - Bottle does auth + key resolution only.
+          - It returns X-Accel-Redirect to an internal Nginx (OpenResty) location.
+          - Nginx streams bytes directly from MinIO, signed with SigV4 (Lua).
+
+        Otherwise:
+          - Stream through Python using boto3 (original behavior).
+        """
         full_key = self.s3_full_key(rel)
+
+        # --- Fast path: Nginx/OpenResty streams from MinIO ---
+        if getattr(settings, 'NGINX_S3_ACCEL', False):
+            prefix = getattr(settings, 'NGINX_S3_ACCEL_PREFIX', '/_s3_internal')
+            key = self.s3_key(full_key)
+
+            dn = downloadname or filename_for_ct or os.path.basename(full_key)
+            # UTF-8 safe quoting for filenames
+            dn_q = quote(os.path.basename(dn).encode('utf-8', 'replace'))
+
+            # Note: dn/disp are used by Nginx to set headers and must NOT be forwarded to MinIO.
+            internal_uri = f"{prefix}/{self.S3_BUCKET}/{key}?dn={dn_q}"
+            r = HTTPResponse(status=200, body=b'')
+            r.set_header('X-Accel-Redirect', internal_uri)
+            return r
+
+        # --- Slow path: stream through Python (original behavior) ---
         s3 = self.get_s3()
         head = s3.head_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
         obj = s3.get_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
@@ -327,7 +353,6 @@ class S3Connection:
 
         mime, _ = guess_type(filename_for_ct or full_key)
         ctype = mime or head.get('ContentType', 'application/octet-stream')
-        # Inline unless caller asked for a download name
         dn = downloadname or filename_for_ct or os.path.basename(full_key)
         dn_q = quote(os.path.basename(dn).encode('ascii', 'replace'))
 

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import logging
 import os
 import shutil
@@ -302,12 +300,12 @@ def static(path):
         return response
 
     if s3_conn.S3_ENDPOINT:
-        with s3_conn.storage_tempfile(path) as tmp_path:
-            mime, _ = guess_type(filename)
-            dirpath, fname = os.path.split(tmp_path)
-            resp = static_file(fname, root=dirpath, mimetype=mime)
-            resp.set_header('Content-Disposition', f'inline; filename="{filename}"')
-            return resp
+        return s3_conn.s3_stream_response(
+                    rel=path,
+                    filename_for_ct=filename,
+                    downloadname=None
+                                           )
+
 
     return static_file(path, root=settings.BASE_DIR)
 
