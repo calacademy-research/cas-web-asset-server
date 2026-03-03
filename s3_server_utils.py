@@ -279,7 +279,11 @@ class S3Connection:
         """
         full_key = self.s3_full_key(rel)
         file_object.seek(0)
-        self.get_s3().put_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key), Body=file_object.read())
+        mime, _ = guess_type(full_key)
+        kwargs = dict(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key), Body=file_object.read())
+        if mime:
+            kwargs["ContentType"] = mime
+        self.get_s3().put_object(**kwargs)
 
     @retry_s3_call()
     def storage_delete(self, rel: str):

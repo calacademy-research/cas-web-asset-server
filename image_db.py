@@ -152,6 +152,37 @@ class ImageDb():
         finally:
             cnx.close()
 
+        self._create_indexes()
+
+    def _create_indexes(self):
+        """Create database indexes if they don't already exist."""
+        indexes = [
+            ('idx_internal_filename', 'internal_filename', None),
+            ('idx_orig_md5', 'orig_md5', None),
+            ('idx_collection', 'collection', None),
+            ('idx_original_filename', 'original_filename', 255),
+        ]
+
+        cnx = _get_pool().get_connection()
+        try:
+            cursor = cnx.cursor(buffered=True)
+            cursor.execute(
+                "SELECT index_name FROM information_schema.statistics "
+                "WHERE table_schema = DATABASE() AND table_name = 'images'")
+            existing = {row[0] for row in cursor.fetchall()}
+
+            for index_name, column_name, prefix_length in indexes:
+                if index_name not in existing:
+                    if prefix_length:
+                        sql = f"CREATE INDEX {index_name} ON images({column_name}({prefix_length}))"
+                    else:
+                        sql = f"CREATE INDEX {index_name} ON images({column_name})"
+                    self.log(f"Creating index: {sql}")
+                    cursor.execute(sql)
+            cursor.close()
+        finally:
+            cnx.close()
+
     def create_image_record(self,
                             original_filename,
                             url,
