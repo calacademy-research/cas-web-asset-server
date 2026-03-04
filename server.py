@@ -16,7 +16,7 @@ from collection_definitions import COLLECTION_DIRS
 from datetime import datetime
 from time import sleep
 from cas_metadata_tools import MetadataTools
-from sh import convert
+import subprocess
 from bottle import Bottle
 from image_db import ImageDb
 from image_db import TIME_FORMAT
@@ -253,7 +253,7 @@ def resolve_file(filename, collection, type, scale):
                 convert_args.extend(['-background', 'white', '-flatten'])
 
             tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix=ext).name
-            convert(convert_input, *convert_args, tmp_out)
+            subprocess.run(["convert", convert_input] + convert_args + [tmp_out], check=True, timeout=120)
 
             try:
                 with open(tmp_out, 'rb') as f:
@@ -277,7 +277,7 @@ def resolve_file(filename, collection, type, scale):
         convert_args.extend(['-background', 'white', '-flatten'])
 
     tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix=ext).name
-    convert(input_path, *convert_args, tmp_out)
+    subprocess.run(["convert", input_path] + convert_args + [tmp_out], check=True, timeout=120)
 
     final_path = os.path.join(settings.BASE_DIR, rel_thumb)
     # using shutil to account for mounted filesystem
