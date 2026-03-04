@@ -253,7 +253,7 @@ def resolve_file(filename, collection, type, scale):
                 convert_args.extend(['-background', 'white', '-flatten'])
 
             tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix=ext).name
-            subprocess.run(["convert", convert_input] + convert_args + [tmp_out], check=True, timeout=120)
+            subprocess.run(["convert", convert_input] + convert_args + [tmp_out], check=True, timeout=120, close_fds=False)
 
             try:
                 with open(tmp_out, 'rb') as f:
@@ -277,7 +277,7 @@ def resolve_file(filename, collection, type, scale):
         convert_args.extend(['-background', 'white', '-flatten'])
 
     tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix=ext).name
-    subprocess.run(["convert", input_path] + convert_args + [tmp_out], check=True, timeout=120)
+    subprocess.run(["convert", input_path] + convert_args + [tmp_out], check=True, timeout=120, close_fds=False)
 
     final_path = os.path.join(settings.BASE_DIR, rel_thumb)
     # using shutil to account for mounted filesystem
