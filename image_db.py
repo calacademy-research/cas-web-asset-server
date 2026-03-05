@@ -3,6 +3,7 @@ from mysql.connector import errorcode
 from mysql.connector.pooling import MySQLConnectionPool
 from retrying import retry
 from contextlib import contextmanager
+import threading
 
 import settings
 from datetime import datetime
@@ -13,12 +14,17 @@ TIME_FORMAT = TIME_FORMAT_NO_OFFSET + "%z"
 
 # Module-level connection pool (singleton)
 _pool = None
+_pool_lock = threading.Lock()
 
 
 def _get_pool():
-    """Get or create the connection pool (singleton)."""
+    """Get or create the connection pool (singleton). Thread-safe."""
     global _pool
-    if _pool is None:
+    if _pool is not None:
+        return _pool
+    with _pool_lock:
+        if _pool is not None:
+            return _pool
         pool_config = {
             'pool_name': 'image_db_pool',
             'pool_size': 10,

@@ -49,6 +49,7 @@ class S3Connection:
 
         self.chunk_size = 64 * 1024
         self._s3 = None
+        self._s3_lock = threading.Lock()
         atexit.register(self.cleanup_temp_folder)
         weakref.finalize(self, self.cleanup_temp_folder)
 
@@ -73,9 +74,10 @@ class S3Connection:
         )
 
     @staticmethod
-    def retry_s3_call():
+    def retry_s3_call(max_retries=5):
         """
-        Retry decorator for S3 operations with progressive backoff and infinite retries after 60s.
+        Retry decorator for S3 operations with progressive backoff.
+        Gives up after max_retries attempts and returns 503.
         """
 
         def decorator(func):
@@ -93,8 +95,13 @@ class S3Connection:
                             abort(404, msg)
 
                         attempt += 1
+                        if attempt >= max_retries:
+                            logging.error(
+                                f"[{func.__name__}] Failed after {attempt} attempts: {type(e).__name__}: {e}"
+                            )
+                            abort(503, f"S3 temporarily unavailable after {attempt} retries")
                         logging.warning(
-                            f"[{func.__name__}] Attempt {attempt} failed: {type(e).__name__}: {e}. "
+                            f"[{func.__name__}] Attempt {attempt}/{max_retries} failed: {type(e).__name__}: {e}. "
                             f"Retrying in {delay}s..."
                         )
                         time.sleep(delay)
@@ -102,8 +109,13 @@ class S3Connection:
 
                     except (EndpointConnectionError, ConnectionClosedError, ReadTimeoutError) as e:
                         attempt += 1
+                        if attempt >= max_retries:
+                            logging.error(
+                                f"[{func.__name__}] Failed after {attempt} attempts: {type(e).__name__}: {e}"
+                            )
+                            abort(503, f"S3 temporarily unavailable after {attempt} retries")
                         logging.warning(
-                            f"[{func.__name__}] Attempt {attempt} failed: {type(e).__name__}: {e}. "
+                            f"[{func.__name__}] Attempt {attempt}/{max_retries} failed: {type(e).__name__}: {e}. "
                             f"Retrying in {delay}s..."
                         )
                         time.sleep(delay)
@@ -151,12 +163,16 @@ class S3Connection:
 
     @retry_s3_call()
     def get_s3(self):
-        """Lazy-initialized singleton S3 client (only if USE_S3)."""
+        """Lazy-initialized singleton S3 client (only if USE_S3). Thread-safe."""
         if not self.S3_ENDPOINT:
             raise RuntimeError("S3 is not enabled")
-        if not hasattr(self, "_s3") or self._s3 is None:
+        if self._s3 is not None:
+            return self._s3
+        with self._s3_lock:
+            if self._s3 is not None:
+                return self._s3
             session = boto3.session.Session()
-            self._s3 = session.client(
+            client = session.client(
                 's3',
                 endpoint_url=self.S3_ENDPOINT,
                 aws_access_key_id=self.S3_ACCESS_KEY,
@@ -166,28 +182,29 @@ class S3Connection:
                     max_pool_connections=64,
                     retries={'max_attempts': 10, 'mode': 'adaptive'},
                     connect_timeout=3,
-                    read_timeout=600,
+                    read_timeout=30,
                     tcp_keepalive=True,
                     signature_version='s3v4',
-                    s3={'use_dualstack_endpoint': True}  # optional; helpful if you want IPv6
+                    s3={'use_dualstack_endpoint': True}
                 )
             )
             # Ensure bucket exists
             try:
-                self._s3.head_bucket(Bucket=self.S3_BUCKET)
+                client.head_bucket(Bucket=self.S3_BUCKET)
             except ClientError as e:
                 code = e.response['Error']['Code']
                 if code in ('404', 'NoSuchBucket'):
                     try:
-                        self._s3.create_bucket(Bucket=self.S3_BUCKET)
+                        client.create_bucket(Bucket=self.S3_BUCKET)
                         time.sleep(10)
-                        self._s3.head_bucket(Bucket=self.S3_BUCKET)
+                        client.head_bucket(Bucket=self.S3_BUCKET)
                     except ClientError as e:
                         logging.critical(f"Bucket {self.S3_BUCKET} does not exist and could not be created.", e)
                         raise
                 else:
                     logging.critical(f"Bucket {self.S3_BUCKET} does not exist and could not be created.", e)
                     raise
+            self._s3 = client
         return self._s3
 
     def s3_full_key(self, rel: str) -> str:
