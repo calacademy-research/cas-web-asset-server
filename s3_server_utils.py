@@ -50,6 +50,8 @@ class S3Connection:
         self.chunk_size = 64 * 1024
         self._s3 = None
         self._s3_lock = threading.Lock()
+        self._s3_created_at = 0
+        self._S3_CLIENT_MAX_AGE = 300  # seconds — recreate client to flush stale pooled connections
         atexit.register(self.cleanup_temp_folder)
         weakref.finalize(self, self.cleanup_temp_folder)
 
@@ -194,14 +196,17 @@ class S3Connection:
 
     @retry_s3_call()
     def get_s3(self):
-        """Lazy-initialized singleton S3 client (only if USE_S3). Thread-safe."""
+        """Lazy-initialized S3 client with periodic refresh to flush stale connections."""
         if not self.S3_ENDPOINT:
             raise RuntimeError("S3 is not enabled")
-        if self._s3 is not None:
+        now = time.monotonic()
+        if self._s3 is not None and (now - self._s3_created_at) < self._S3_CLIENT_MAX_AGE:
             return self._s3
         with self._s3_lock:
-            if self._s3 is not None:
+            if self._s3 is not None and (now - self._s3_created_at) < self._S3_CLIENT_MAX_AGE:
                 return self._s3
+            if self._s3 is not None:
+                logging.info(f"Recycling S3 client (age {round(now - self._s3_created_at)}s)")
             session = boto3.session.Session()
             client = session.client(
                 's3',
@@ -210,7 +215,7 @@ class S3Connection:
                 aws_secret_access_key=self.S3_SECRET_KEY,
                 region_name=self.S3_REGION,
                 config=Config(
-                    max_pool_connections=64,
+                    max_pool_connections=4,
                     retries={'max_attempts': 2, 'mode': 'standard'},
                     connect_timeout=3,
                     read_timeout=10,
@@ -236,6 +241,7 @@ class S3Connection:
                     logging.critical(f"Bucket {self.S3_BUCKET} does not exist and could not be created.", e)
                     raise
             self._s3 = client
+            self._s3_created_at = time.monotonic()
         return self._s3
 
     def s3_full_key(self, rel: str) -> str:
