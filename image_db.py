@@ -52,22 +52,25 @@ class ImageDb():
     @contextmanager
     def _get_connection(self):
         """Context manager for pooled connections."""
-        cnx = _get_pool().get_connection()
+        cnx = None
         try:
+            cnx = _get_pool().get_connection()
             yield cnx
         finally:
-            cnx.close()  # Returns connection to pool
+            if cnx:
+                cnx.close()
 
     @contextmanager
     def get_connection(self):
         """Context manager for pooled connections with cursor."""
-        cnx = _get_pool().get_connection()
-        cursor = cnx.cursor(buffered=True)
+        cnx = None
         try:
+            cnx = _get_pool().get_connection()
+            cursor = cnx.cursor(buffered=True)
             yield cnx, cursor
         finally:
-            cursor.close()
-            cnx.close()  # Returns to pool
+            if cnx:
+                cnx.close()
 
     @retry(retry_on_exception=lambda e: isinstance(e, mysql.connector.OperationalError), stop_max_attempt_number=3,
            wait_exponential_multiplier=2)
