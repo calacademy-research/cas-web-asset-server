@@ -76,8 +76,8 @@ class S3Connection:
     @staticmethod
     def retry_s3_call(max_retries=5):
         """
-        Retry decorator for S3 operations with progressive backoff.
-        Gives up after max_retries attempts and returns 503.
+        Retry decorator for S3 client initialization only.
+        Retries with progressive backoff on transient errors.
         """
 
         def decorator(func):
@@ -85,37 +85,43 @@ class S3Connection:
             def wrapper(*args, **kwargs):
                 delay = 0
                 attempt = 0
+                t_op_start = time.monotonic()
                 while True:
+                    t0 = time.monotonic()
                     try:
-                        return func(*args, **kwargs)
+                        result = func(*args, **kwargs)
+                        dt = round((time.monotonic() - t0) * 1000, 1)
+                        if dt > 500:
+                            logging.info(f"S3_OP {func.__name__} ok {dt}ms attempt={attempt+1}")
+                        return result
 
                     except ClientError as e:
-                        if S3Connection.not_found_client_error(e):
-                            msg = e.response.get("Error", {}).get("Message") or "Not Found"
-                            abort(404, msg)
-
+                        dt = round((time.monotonic() - t0) * 1000, 1)
                         attempt += 1
                         if attempt >= max_retries:
+                            total_dt = round((time.monotonic() - t_op_start) * 1000, 1)
                             logging.error(
-                                f"[{func.__name__}] Failed after {attempt} attempts: {type(e).__name__}: {e}"
+                                f"S3_OP {func.__name__} FAILED {total_dt}ms after {attempt} attempts: {type(e).__name__}: {e}"
                             )
-                            abort(503, f"S3 temporarily unavailable after {attempt} retries")
+                            raise
                         logging.warning(
-                            f"[{func.__name__}] Attempt {attempt}/{max_retries} failed: {type(e).__name__}: {e}. "
+                            f"S3_OP {func.__name__} retry {dt}ms attempt={attempt}/{max_retries}: {type(e).__name__}: {e}. "
                             f"Retrying in {delay}s..."
                         )
                         time.sleep(delay)
                         delay = min(delay + 10, 60)
 
                     except (EndpointConnectionError, ConnectionClosedError, ReadTimeoutError) as e:
+                        dt = round((time.monotonic() - t0) * 1000, 1)
                         attempt += 1
                         if attempt >= max_retries:
+                            total_dt = round((time.monotonic() - t_op_start) * 1000, 1)
                             logging.error(
-                                f"[{func.__name__}] Failed after {attempt} attempts: {type(e).__name__}: {e}"
+                                f"S3_OP {func.__name__} FAILED {total_dt}ms after {attempt} attempts: {type(e).__name__}: {e}"
                             )
-                            abort(503, f"S3 temporarily unavailable after {attempt} retries")
+                            raise
                         logging.warning(
-                            f"[{func.__name__}] Attempt {attempt}/{max_retries} failed: {type(e).__name__}: {e}. "
+                            f"S3_OP {func.__name__} retry {dt}ms attempt={attempt}/{max_retries}: {type(e).__name__}: {e}. "
                             f"Retrying in {delay}s..."
                         )
                         time.sleep(delay)
@@ -124,6 +130,31 @@ class S3Connection:
             return wrapper
 
         return decorator
+
+    @staticmethod
+    def s3_error_handler(func):
+        """
+        Decorator that converts S3 exceptions to HTTP errors.
+        No retries — fail fast so the client can retry naturally.
+        """
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            t0 = time.monotonic()
+            try:
+                return func(*args, **kwargs)
+            except ClientError as e:
+                dt = round((time.monotonic() - t0) * 1000, 1)
+                if S3Connection.not_found_client_error(e):
+                    logging.debug(f"S3_OP {func.__name__} 404 {dt}ms")
+                    msg = e.response.get("Error", {}).get("Message") or "Not Found"
+                    abort(404, msg)
+                logging.error(f"S3_OP {func.__name__} FAILED {dt}ms: {type(e).__name__}: {e}")
+                abort(503, "S3 temporarily unavailable")
+            except (EndpointConnectionError, ConnectionClosedError, ReadTimeoutError) as e:
+                dt = round((time.monotonic() - t0) * 1000, 1)
+                logging.error(f"S3_OP {func.__name__} FAILED {dt}ms: {type(e).__name__}: {e}")
+                abort(503, "S3 temporarily unavailable")
+        return wrapper
 
     def cleanup_temp_folder(self):
         """Remove this instance's TMP_FOLDER and stale s3_temp folders safely."""
@@ -180,9 +211,9 @@ class S3Connection:
                 region_name=self.S3_REGION,
                 config=Config(
                     max_pool_connections=64,
-                    retries={'max_attempts': 10, 'mode': 'adaptive'},
+                    retries={'max_attempts': 2, 'mode': 'standard'},
                     connect_timeout=3,
-                    read_timeout=30,
+                    read_timeout=10,
                     tcp_keepalive=True,
                     signature_version='s3v4',
                     s3={'use_dualstack_endpoint': True}
@@ -213,7 +244,7 @@ class S3Connection:
         prefix = (self.S3_PREFIX or "").strip("/")
         return posixpath.join(prefix, rel) if prefix else rel
 
-    @retry_s3_call()
+    @s3_error_handler
     def storage_exists(self, rel: str) -> bool:
         """
         Check if object exists locally or in S3.
@@ -231,7 +262,7 @@ class S3Connection:
 
         return False
 
-    @retry_s3_call()
+    @s3_error_handler
     def orig_location(self, rel: str) -> str:
         """
         Validate that the original exists (S3 mode) before returning rel key/path.
@@ -240,7 +271,7 @@ class S3Connection:
             abort(404, f"Missing object: {rel}")
         return rel
 
-    @retry_s3_call()
+    @s3_error_handler
     @contextmanager
     def storage_tempfile(self, rel: str):
         """
@@ -252,12 +283,15 @@ class S3Connection:
         fd, tmp_path = tempfile.mkstemp(dir=self.TMP_FOLDER, prefix="s3dl_", suffix=ext or "")
         os.close(fd)
         try:
+            t0 = time.monotonic()
             self.get_s3().download_file(self.S3_BUCKET, self.s3_key(full_key), tmp_path)
+            dt = round((time.monotonic() - t0) * 1000, 1)
+            file_size = os.path.getsize(tmp_path)
+            logging.info(f"S3_DOWNLOAD key={self.s3_key(full_key)} size={file_size} bytes dt={dt}ms")
             yield tmp_path
         finally:
             self.remove_tempfile(tmp_path)
 
-    @retry_s3_call()
     def remove_tempfile(self, tmp_path: str):
         """
         removes temp-files created by the storage download with exception
@@ -269,7 +303,7 @@ class S3Connection:
             except OSError as e:
                 logging.warning(f"Could not delete {tmp_path}: {e}")
 
-    @retry_s3_call()
+    @s3_error_handler
     def storage_download(self, rel: str) -> str:
         """
         downloads from S3 to a temp file and returns the local path.
@@ -288,7 +322,7 @@ class S3Connection:
             self.remove_tempfile(tmp_path)
             raise
 
-    @retry_s3_call()
+    @s3_error_handler
     def storage_save(self, rel: str, file_object):
         """
         Save file data either to local filesystem or S3.
@@ -302,7 +336,7 @@ class S3Connection:
             kwargs["ContentType"] = mime
         self.get_s3().put_object(**kwargs)
 
-    @retry_s3_call()
+    @s3_error_handler
     def storage_delete(self, rel: str):
         """
         Delete the object referenced by rel from local filesystem or S3.
@@ -314,7 +348,7 @@ class S3Connection:
             return
         abort(404)
 
-    @retry_s3_call()
+    @s3_error_handler
     def storage_url(self, rel: str):
         """
         Generate a pre-signed URL for an S3 object if running in S3 mode. Returns None otherwise
@@ -328,7 +362,6 @@ class S3Connection:
             )
         return None
 
-    @retry_s3_call()
     def stream(self, body):
         """loads the stream by iterating through the file body by chunk size"""
         try:
@@ -337,7 +370,7 @@ class S3Connection:
         finally:
             body.close()
 
-    @retry_s3_call()
+    @s3_error_handler
     def s3_stream_response(self, rel, downloadname=None, filename_for_ct=None):
         """Return a Bottle response for an S3 object.
 
