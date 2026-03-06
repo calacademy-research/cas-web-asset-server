@@ -1,9 +1,15 @@
 import logging
 import os
 import shutil
+import signal
 import sys
+import faulthandler
 import time
 import tempfile
+import threading
+import uuid
+import resource
+from contextlib import contextmanager
 from functools import wraps
 from glob import glob
 from mimetypes import guess_type
@@ -23,6 +29,13 @@ from image_db import TIME_FORMAT
 from urllib.parse import unquote
 from s3_server_utils import S3Connection
 
+# Phase 6: crash forensics — dump Python tracebacks on SIGSEGV/SIGABRT
+faulthandler.enable(file=sys.stderr, all_threads=True)
+try:
+    faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True)
+except (OSError, AttributeError):
+    pass  # SIGUSR1 not available on all platforms
+
 app = application = Bottle()
 
 # initializing s3 connection
@@ -40,6 +53,8 @@ from bottle import (
 
 BaseRequest.MEMFILE_MAX = 300 * 1024 * 1024
 
+_server_start_time = time.monotonic()
+
 # Singleton ImageDb instance - pool handles connections
 _image_db = None
 
@@ -48,6 +63,61 @@ def get_image_db():
     if _image_db is None:
         _image_db = ImageDb()
     return _image_db
+
+
+class RequestTracer:
+    """Bottle plugin: wraps every request with timing, unique ID, and structured JSON logging."""
+    name = 'request_tracer'
+    api = 2
+
+    def apply(self, callback, route):
+        def wrapper(*args, **kwargs):
+            req_id = request.headers.get('X-Request-Id', str(uuid.uuid4())[:8])
+            request.trace = {
+                'req_id': req_id,
+                'method': request.method,
+                'path': request.path,
+                'query': dict(request.query),
+                't_start': time.monotonic(),
+                'stages': [],
+                'pid': os.getpid(),
+                'tid': threading.get_ident(),
+            }
+            try:
+                result = callback(*args, **kwargs)
+                request.trace['status'] = response.status_code
+                return result
+            except HTTPResponse as e:
+                request.trace['status'] = e.status_code
+                raise
+            except Exception as e:
+                request.trace['status'] = 500
+                request.trace['error'] = f"{type(e).__name__}: {e}"
+                raise
+            finally:
+                request.trace['t_total_ms'] = round(
+                    (time.monotonic() - request.trace['t_start']) * 1000, 1
+                )
+                # Only log non-trivial requests (skip GET / which is noisy)
+                if request.trace.get('t_total_ms', 0) > 100 or request.path != '/':
+                    logging.info("REQ_TRACE " + json.dumps(request.trace, default=str))
+        return wrapper
+
+app.install(RequestTracer())
+
+
+@contextmanager
+def trace_stage(name):
+    """Add a timed stage to the current request trace."""
+    t0 = time.monotonic()
+    try:
+        yield
+    finally:
+        dt = round((time.monotonic() - t0) * 1000, 1)
+        try:
+            request.trace['stages'].append((name, dt))
+        except (AttributeError, KeyError):
+            pass
 
 
 def log(msg):
@@ -213,7 +283,8 @@ def resolve_file(filename, collection, type, scale):
     file_path = os.path.join(relpath, storename)
 
     if not thumb_p:
-        return s3_conn.orig_location(file_path)
+        with trace_stage('orig_location'):
+            return s3_conn.orig_location(file_path)
 
     scale = int(scale)
     mimetype, encoding = guess_type(storename)
@@ -227,9 +298,10 @@ def resolve_file(filename, collection, type, scale):
     rel_thumb = os.path.join(relpath, scaled_name)
 
     if s3_conn.S3_ENDPOINT:
-        if s3_conn.storage_exists(rel_thumb):
-            log("Serving previously scaled thumbnail from S3")
-            return rel_thumb
+        with trace_stage('s3_exists_thumb'):
+            if s3_conn.storage_exists(rel_thumb):
+                log("Serving previously scaled thumbnail from S3")
+                return rel_thumb
     else:
         local_thumb = os.path.join(settings.BASE_DIR, rel_thumb)
         if os.path.exists(local_thumb):
@@ -241,25 +313,40 @@ def resolve_file(filename, collection, type, scale):
     if s3_conn.S3_ENDPOINT:
         orig_key = os.path.join(get_rel_path(collection, False, storename), storename)
 
-        if not s3_conn.storage_exists(orig_key):
-            abort(404, f"Missing object: {orig_key}")
+        with trace_stage('s3_exists_orig'):
+            if not s3_conn.storage_exists(orig_key):
+                abort(404, f"Missing object: {orig_key}")
 
         # Context-managed download ensures the temp file is deleted after use
-        with s3_conn.storage_tempfile(orig_key) as input_path:
-            convert_args = ['-resize', f"{scale}x{scale}>"]
-            convert_input = input_path
-            if mimetype == 'application/pdf':
-                convert_input = f"{input_path}[0]"
-                convert_args.extend(['-background', 'white', '-flatten'])
+        with trace_stage('s3_download'):
+            with s3_conn.storage_tempfile(orig_key) as input_path:
+                try:
+                    request.trace['file_size_bytes'] = os.path.getsize(input_path)
+                except (AttributeError, KeyError):
+                    pass
 
-            tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix=ext).name
-            subprocess.run(["convert", convert_input] + convert_args + [tmp_out], check=True, timeout=120, close_fds=False)
+                convert_args = ['-resize', f"{scale}x{scale}>"]
+                convert_input = input_path
+                if mimetype == 'application/pdf':
+                    convert_input = f"{input_path}[0]"
+                    convert_args.extend(['-background', 'white', '-flatten'])
 
-            try:
-                with open(tmp_out, 'rb') as f:
-                    s3_conn.storage_save(rel_thumb, f)
-            finally:
-                s3_conn.remove_tempfile(tmp_out)
+                tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix=ext).name
+                with trace_stage('imagemagick_convert'):
+                    result = subprocess.run(
+                        ["convert", convert_input] + convert_args + [tmp_out],
+                        check=True, timeout=30, close_fds=False,
+                        capture_output=True
+                    )
+                    if result.stderr:
+                        logging.warning(f"CONVERT_STDERR: {result.stderr.decode('utf-8', errors='replace')[:500]}")
+
+                try:
+                    with trace_stage('s3_upload_thumb'):
+                        with open(tmp_out, 'rb') as f:
+                            s3_conn.storage_save(rel_thumb, f)
+                finally:
+                    s3_conn.remove_tempfile(tmp_out)
 
         return rel_thumb
     else:
@@ -277,7 +364,7 @@ def resolve_file(filename, collection, type, scale):
         convert_args.extend(['-background', 'white', '-flatten'])
 
     tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix=ext).name
-    subprocess.run(["convert", input_path] + convert_args + [tmp_out], check=True, timeout=120, close_fds=False)
+    subprocess.run(["convert", input_path] + convert_args + [tmp_out], check=True, timeout=30, close_fds=False)
 
     final_path = os.path.join(settings.BASE_DIR, rel_thumb)
     # using shutil to account for mounted filesystem
@@ -361,7 +448,8 @@ def fileget():
     """Returns the file data of the file indicated by the query parameters."""
     log(f"fileget {request.query.filename}")
     image_db = get_image_db()
-    records = image_db.get_image_record_by_internal_filename(request.query.filename)
+    with trace_stage('db_lookup'):
+        records = image_db.get_image_record_by_internal_filename(request.query.filename)
     log("Fileget complete")
     if len(records) < 1:
         log(f"Record not found: {request.query.filename}")
@@ -721,6 +809,43 @@ def web_asset_store():
     response.content_type = 'text/xml; charset=utf-8'
     return template('web_asset_store.xml', host="%s:%d" % (settings.SERVER_NAME, settings.SERVER_PORT),
                     protocol=settings.SERVER_PROTOCOL)
+
+
+@app.route('/debug/health')
+def debug_health():
+    """Lightweight health check — does NOT touch S3 or MySQL."""
+    try:
+        import uwsgi
+        worker_info = {
+            'worker_id': uwsgi.worker_id(),
+            'total_requests': uwsgi.total_requests(),
+        }
+    except (ImportError, AttributeError):
+        worker_info = {}
+
+    rusage = resource.getrusage(resource.RUSAGE_SELF)
+    info = {
+        'status': 'ok',
+        'pid': os.getpid(),
+        'tid': threading.get_ident(),
+        'active_threads': threading.active_count(),
+        'rss_kb': rusage.ru_maxrss,
+        'utime_s': round(rusage.ru_utime, 2),
+        'stime_s': round(rusage.ru_stime, 2),
+        'worker': worker_info,
+        'uptime_s': round(time.monotonic() - _server_start_time, 1),
+        's3_temp_dirs': len(os.listdir('s3_temp')) if os.path.isdir('s3_temp') else 0,
+    }
+    response.content_type = 'application/json'
+    return json.dumps(info)
+
+
+@app.route('/debug/pool')
+def debug_pool():
+    """MySQL connection pool stats."""
+    from image_db import _pool_stats
+    response.content_type = 'application/json'
+    return json.dumps(_pool_stats)
 
 
 @app.route('/')
