@@ -51,10 +51,32 @@ class S3Connection:
         self._s3 = None
         self._s3_lock = threading.Lock()
         self._s3_created_at = 0
-        self._S3_CLIENT_MAX_AGE = 300  # seconds — recreate client to flush stale pooled connections
+        self._S3_CLIENT_MAX_AGE = 120  # seconds — recreate before MinIO closes idle connections
         atexit.register(self.cleanup_temp_folder)
         weakref.finalize(self, self.cleanup_temp_folder)
 
+
+    @staticmethod
+    def _close_s3_client(client):
+        """Close the underlying urllib3 connection pools to prevent CLOSE-WAIT socket leaks.
+
+        PoolManager.clear() only drops pool references without closing sockets.
+        We must call close() on each connection pool to actually shut down the
+        TCP connections, otherwise they linger in CLOSE-WAIT indefinitely.
+        """
+        try:
+            http_session = client._endpoint.http_session
+            manager = http_session._manager
+            with manager.pools.lock:
+                pools = list(manager.pools._container.values())
+            for pool in pools:
+                try:
+                    pool.close()
+                except Exception:
+                    pass
+            http_session.close()
+        except Exception as e:
+            logging.debug(f"S3 client close error (non-fatal): {e}")
 
     @staticmethod
     def not_found_client_error(e: ClientError) -> bool:
@@ -194,55 +216,63 @@ class S3Connection:
         return p.lstrip('/')
 
 
-    @retry_s3_call()
+    def _create_s3_client(self):
+        """Create a new boto3 S3 client (no I/O, no locks)."""
+        session = boto3.session.Session()
+        return session.client(
+            's3',
+            endpoint_url=self.S3_ENDPOINT,
+            aws_access_key_id=self.S3_ACCESS_KEY,
+            aws_secret_access_key=self.S3_SECRET_KEY,
+            region_name=self.S3_REGION,
+            config=Config(
+                max_pool_connections=4,
+                retries={'max_attempts': 2, 'mode': 'standard'},
+                connect_timeout=3,
+                read_timeout=10,
+                tcp_keepalive=True,
+                signature_version='s3v4',
+                s3={'use_dualstack_endpoint': True}
+            )
+        )
+
     def get_s3(self):
-        """Lazy-initialized S3 client with periodic refresh to flush stale connections."""
+        """Lazy-initialized S3 client with periodic refresh to flush stale connections.
+
+        Recycling prevents CLOSE-WAIT socket leaks: MinIO closes idle connections
+        (sends FIN), but urllib3 never reads the TLS close_notify. Sockets accumulate
+        in CLOSE-WAIT and hang when reused. We recycle the client (and properly close
+        the old sockets) before they go stale.
+
+        IMPORTANT: The lock only protects the pointer swap. All I/O (client creation,
+        bucket validation, old client cleanup) happens outside the lock to prevent
+        thread starvation — if head_bucket or close hangs, only one thread is affected.
+        """
         if not self.S3_ENDPOINT:
             raise RuntimeError("S3 is not enabled")
         now = time.monotonic()
         if self._s3 is not None and (now - self._s3_created_at) < self._S3_CLIENT_MAX_AGE:
             return self._s3
+
+        # Create new client OUTSIDE the lock (no I/O in constructor)
+        client = self._create_s3_client()
+        old_client = None
+
         with self._s3_lock:
-            if self._s3 is not None and (now - self._s3_created_at) < self._S3_CLIENT_MAX_AGE:
+            # Double-check — another thread may have already recycled
+            if self._s3 is not None and (time.monotonic() - self._s3_created_at) < self._S3_CLIENT_MAX_AGE:
+                # Another thread won the race; discard our new client
+                self._close_s3_client(client)
                 return self._s3
-            if self._s3 is not None:
-                logging.info(f"Recycling S3 client (age {round(now - self._s3_created_at)}s)")
-            session = boto3.session.Session()
-            client = session.client(
-                's3',
-                endpoint_url=self.S3_ENDPOINT,
-                aws_access_key_id=self.S3_ACCESS_KEY,
-                aws_secret_access_key=self.S3_SECRET_KEY,
-                region_name=self.S3_REGION,
-                config=Config(
-                    max_pool_connections=4,
-                    retries={'max_attempts': 2, 'mode': 'standard'},
-                    connect_timeout=3,
-                    read_timeout=10,
-                    tcp_keepalive=True,
-                    signature_version='s3v4',
-                    s3={'use_dualstack_endpoint': True}
-                )
-            )
-            # Ensure bucket exists
-            try:
-                client.head_bucket(Bucket=self.S3_BUCKET)
-            except ClientError as e:
-                code = e.response['Error']['Code']
-                if code in ('404', 'NoSuchBucket'):
-                    try:
-                        client.create_bucket(Bucket=self.S3_BUCKET)
-                        time.sleep(10)
-                        client.head_bucket(Bucket=self.S3_BUCKET)
-                    except ClientError as e:
-                        logging.critical(f"Bucket {self.S3_BUCKET} does not exist and could not be created.", e)
-                        raise
-                else:
-                    logging.critical(f"Bucket {self.S3_BUCKET} does not exist and could not be created.", e)
-                    raise
+            old_client = self._s3
             self._s3 = client
             self._s3_created_at = time.monotonic()
-        return self._s3
+
+        # All I/O happens OUTSIDE the lock
+        if old_client is not None:
+            self._close_s3_client(old_client)
+            logging.info(f"S3 client recycled (pid={os.getpid()})")
+        return client
 
     def s3_full_key(self, rel: str) -> str:
         """uses posixpath to create full key to avoid double slashes"""
@@ -258,12 +288,22 @@ class S3Connection:
         """
         full_key = self.s3_full_key(rel)
         if self.S3_ENDPOINT:
+            key = self.s3_key(full_key)
+            tid = threading.get_ident()
+            t0 = time.monotonic()
             try:
-                self.get_s3().head_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
+                self.get_s3().head_object(Bucket=self.S3_BUCKET, Key=key)
+                dt = round((time.monotonic() - t0) * 1000, 1)
+                if dt > 500:
+                    logging.warning(f"S3_SLOW head_object SLOW tid={tid} key={key} dt={dt}ms")
                 return True
             except ClientError as e:
+                dt = round((time.monotonic() - t0) * 1000, 1)
                 if e.response['Error']['Code'] == '404':
+                    if dt > 500:
+                        logging.warning(f"S3_SLOW head_object 404 SLOW tid={tid} key={key} dt={dt}ms")
                     return False
+                logging.error(f"S3_ERR head_object tid={tid} key={key} dt={dt}ms error={e}")
                 raise
 
         return False
