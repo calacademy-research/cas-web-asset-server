@@ -271,12 +271,24 @@ def allow_cross_origin(func):
     return wrapper
 
 
+def _check_deadline(deadline):
+    """Abort with 503 if the request deadline has passed."""
+    if time.monotonic() > deadline:
+        logging.warning("REQUEST_DEADLINE exceeded, aborting before harakiri")
+        abort(503, "Request timeout")
+
+
+# Budget must be well under harakiri (20s) so we abort cleanly
+_RESOLVE_DEADLINE_S = 15
+
+
 def resolve_file(filename, collection, type, scale):
     """Inspect the request object to determine the file being requested.
     If the request is for a thumbnail , and it has not been generated, do
     so before returning accession_copy.
     Returns the relative path to the requested file in the base attachments directory.
     """
+    deadline = time.monotonic() + _RESOLVE_DEADLINE_S
     thumb_p = (type == "T")
     storename = filename
     relpath = get_rel_path(collection, thumb_p, storename)
@@ -313,10 +325,12 @@ def resolve_file(filename, collection, type, scale):
     if s3_conn.S3_ENDPOINT:
         orig_key = os.path.join(get_rel_path(collection, False, storename), storename)
 
+        _check_deadline(deadline)
         with trace_stage('s3_exists_orig'):
             if not s3_conn.storage_exists(orig_key):
                 abort(404, f"Missing object: {orig_key}")
 
+        _check_deadline(deadline)
         # Context-managed download ensures the temp file is deleted after use
         with trace_stage('s3_download'):
             with s3_conn.storage_tempfile(orig_key) as input_path:
@@ -325,6 +339,7 @@ def resolve_file(filename, collection, type, scale):
                 except (AttributeError, KeyError):
                     pass
 
+                _check_deadline(deadline)
                 convert_args = ['-resize', f"{scale}x{scale}>"]
                 convert_input = input_path
                 if mimetype == 'application/pdf':
@@ -341,6 +356,7 @@ def resolve_file(filename, collection, type, scale):
                     if result.stderr:
                         logging.warning(f"CONVERT_STDERR: {result.stderr.decode('utf-8', errors='replace')[:500]}")
 
+                _check_deadline(deadline)
                 try:
                     with trace_stage('s3_upload_thumb'):
                         with open(tmp_out, 'rb') as f:

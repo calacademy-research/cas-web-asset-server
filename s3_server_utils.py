@@ -2,6 +2,7 @@
 Variables for s3 api set in docker-compose.yml as environment variables"""
 import os
 import shutil
+import signal
 import sys
 import tempfile
 import uuid
@@ -23,6 +24,40 @@ import threading
 import atexit
 import weakref
 import posixpath
+
+
+class S3CallTimeout(Exception):
+    """Raised when an S3 operation exceeds its hard SIGALRM timeout.
+
+    boto3's read_timeout is per-recv(), so trickle data from a stalled MinIO
+    can keep the socket alive indefinitely.  SIGALRM is the only mechanism
+    that can interrupt a blocking SSL read from the outside.
+    Requires threads=1 in uWSGI (signal delivery targets the main thread).
+    """
+
+
+@contextmanager
+def s3_call_timeout(seconds):
+    """Hard per-call timeout using SIGALRM.
+
+    Only arms the alarm when running in the main thread (threads=1 uWSGI).
+    Falls back to a no-op in non-main threads so the code is safe to run
+    in tests or with threads>1 (where boto3 read_timeout is the only guard).
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def _handler(signum, frame):
+        raise S3CallTimeout(f"S3 call exceeded {seconds}s hard timeout")
+
+    old_handler = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 class S3Connection:
@@ -166,6 +201,10 @@ class S3Connection:
             t0 = time.monotonic()
             try:
                 return func(*args, **kwargs)
+            except S3CallTimeout as e:
+                dt = round((time.monotonic() - t0) * 1000, 1)
+                logging.error(f"S3_OP {func.__name__} HARD_TIMEOUT {dt}ms: {e}")
+                abort(503, "S3 temporarily unavailable")
             except ClientError as e:
                 dt = round((time.monotonic() - t0) * 1000, 1)
                 if S3Connection.not_found_client_error(e):
@@ -227,12 +266,12 @@ class S3Connection:
             region_name=self.S3_REGION,
             config=Config(
                 max_pool_connections=4,
-                retries={'max_attempts': 2, 'mode': 'standard'},
+                retries={'max_attempts': 1, 'mode': 'standard'},
                 connect_timeout=3,
-                read_timeout=10,
+                read_timeout=5,
                 tcp_keepalive=True,
                 signature_version='s3v4',
-                s3={'use_dualstack_endpoint': True}
+                s3={'use_dualstack_endpoint': False}
             )
         )
 
@@ -292,7 +331,8 @@ class S3Connection:
             tid = threading.get_ident()
             t0 = time.monotonic()
             try:
-                self.get_s3().head_object(Bucket=self.S3_BUCKET, Key=key)
+                with s3_call_timeout(3):
+                    self.get_s3().head_object(Bucket=self.S3_BUCKET, Key=key)
                 dt = round((time.monotonic() - t0) * 1000, 1)
                 if dt > 500:
                     logging.warning(f"S3_SLOW head_object SLOW tid={tid} key={key} dt={dt}ms")
@@ -330,7 +370,8 @@ class S3Connection:
         os.close(fd)
         try:
             t0 = time.monotonic()
-            self.get_s3().download_file(self.S3_BUCKET, self.s3_key(full_key), tmp_path)
+            with s3_call_timeout(8):
+                self.get_s3().download_file(self.S3_BUCKET, self.s3_key(full_key), tmp_path)
             dt = round((time.monotonic() - t0) * 1000, 1)
             file_size = os.path.getsize(tmp_path)
             logging.info(f"S3_DOWNLOAD key={self.s3_key(full_key)} size={file_size} bytes dt={dt}ms")
@@ -362,7 +403,8 @@ class S3Connection:
         os.close(fd)
 
         try:
-            self.get_s3().download_file(self.S3_BUCKET, self.s3_key(full_key), tmp_path)
+            with s3_call_timeout(8):
+                self.get_s3().download_file(self.S3_BUCKET, self.s3_key(full_key), tmp_path)
             return tmp_path
         except Exception:
             self.remove_tempfile(tmp_path)
@@ -380,7 +422,8 @@ class S3Connection:
         kwargs = dict(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key), Body=file_object.read())
         if mime:
             kwargs["ContentType"] = mime
-        self.get_s3().put_object(**kwargs)
+        with s3_call_timeout(8):
+            self.get_s3().put_object(**kwargs)
 
     @s3_error_handler
     def storage_delete(self, rel: str):
@@ -390,7 +433,8 @@ class S3Connection:
         full_key = self.s3_full_key(rel)
 
         if self.S3_ENDPOINT:
-            self.get_s3().delete_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
+            with s3_call_timeout(3):
+                self.get_s3().delete_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
             return
         abort(404)
 
@@ -447,8 +491,10 @@ class S3Connection:
 
         # --- Slow path: stream through Python (original behavior) ---
         s3 = self.get_s3()
-        head = s3.head_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
-        obj = s3.get_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
+        with s3_call_timeout(3):
+            head = s3.head_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
+        with s3_call_timeout(3):
+            obj = s3.get_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
         body = obj["Body"]  # botocore.response.StreamingBody
 
         mime, _ = guess_type(filename_for_ct or full_key)
