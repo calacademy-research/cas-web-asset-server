@@ -27,7 +27,7 @@ def _get_pool():
             return _pool
         pool_config = {
             'pool_name': 'image_db_pool',
-            'pool_size': 10,
+            'pool_size': 32,
             'pool_reset_session': True,
             'user': settings.SQL_USER,
             'password': settings.SQL_PASSWORD,

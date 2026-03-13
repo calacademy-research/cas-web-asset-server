@@ -27,7 +27,7 @@ from bottle import Bottle
 from image_db import ImageDb
 from image_db import TIME_FORMAT
 from urllib.parse import unquote
-from s3_server_utils import S3Connection
+from s3_server_utils import S3Connection, s3_call_timeout, S3CallTimeout
 
 # Phase 6: crash forensics — dump Python tracebacks on SIGSEGV/SIGABRT
 faulthandler.enable(file=sys.stderr, all_threads=True)
@@ -37,6 +37,34 @@ except (OSError, AttributeError):
     pass  # SIGUSR1 not available on all platforms
 
 app = application = Bottle()
+
+
+class DbCallTimeout(Exception):
+    """Raised when a database operation exceeds its hard SIGALRM timeout."""
+
+
+@contextmanager
+def db_call_timeout(seconds):
+    """Hard per-call timeout for DB operations using SIGALRM.
+
+    Same mechanism as s3_call_timeout — only arms in main thread (threads=1).
+    Prevents MySQL queries from hanging until harakiri when the DB is slow
+    (NFS contention, lock waits, network stalls).
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def _handler(signum, frame):
+        raise DbCallTimeout(f"DB call exceeded {seconds}s hard timeout")
+
+    old_handler = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 # initializing s3 connection
 s3_conn = S3Connection()
@@ -395,7 +423,12 @@ def static(path):
         abort(404)
     filename = path.split('/')[-1]
     image_db = get_image_db()
-    records = image_db.get_image_record_by_internal_filename(filename)
+    try:
+        with db_call_timeout(5):
+            records = image_db.get_image_record_by_internal_filename(filename)
+    except DbCallTimeout:
+        logging.error(f"DB_TIMEOUT static filename={filename}")
+        abort(503, "Database temporarily unavailable")
     if len(records) < 1:
         log(f"Static record not found: {request.query.filename}")
         response.content_type = 'text/plain; charset=utf-8'
@@ -464,8 +497,13 @@ def fileget():
     """Returns the file data of the file indicated by the query parameters."""
     log(f"fileget {request.query.filename}")
     image_db = get_image_db()
-    with trace_stage('db_lookup'):
-        records = image_db.get_image_record_by_internal_filename(request.query.filename)
+    try:
+        with trace_stage('db_lookup'):
+            with db_call_timeout(5):
+                records = image_db.get_image_record_by_internal_filename(request.query.filename)
+    except DbCallTimeout:
+        logging.error(f"DB_TIMEOUT fileget db_lookup filename={request.query.filename}")
+        abort(503, "Database temporarily unavailable")
     log("Fileget complete")
     if len(records) < 1:
         log(f"Record not found: {request.query.filename}")
@@ -548,14 +586,19 @@ def fileupload():
         return 'Ignoring thumbnail upload!'
 
     # Check for duplicates by original_path in DB
-    if 'original_path' in request.forms:
-        response_list = image_db.get_image_record_by_original_path(
-            original_path=request.forms['original_path'],
-            collection=request.forms.coll,
-            exact=True
-        )
-    else:
-        response_list = []
+    try:
+        with db_call_timeout(5):
+            if 'original_path' in request.forms:
+                response_list = image_db.get_image_record_by_original_path(
+                    original_path=request.forms['original_path'],
+                    collection=request.forms.coll,
+                    exact=True
+                )
+            else:
+                response_list = []
+    except DbCallTimeout:
+        logging.error(f"DB_TIMEOUT fileupload duplicate_check")
+        abort(503, "Database temporarily unavailable")
 
     upload = list(request.files.values())[0]
     log(f"Saving upload: {upload}")
@@ -709,7 +752,12 @@ def get_image_record():
     if not search_function:
         abort(400, 'Invalid search type')
 
-    record_list = search_function()
+    try:
+        with db_call_timeout(5):
+            record_list = search_function()
+    except DbCallTimeout:
+        logging.error(f"DB_TIMEOUT getImageRecord search_type={search_type} query={query_string}")
+        abort(503, "Database temporarily unavailable")
     log(f"Record list: {record_list}")
 
     if not record_list:
