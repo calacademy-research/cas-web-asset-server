@@ -28,6 +28,13 @@ from image_db import ImageDb
 from image_db import TIME_FORMAT
 from urllib.parse import unquote
 from s3_server_utils import S3Connection, s3_call_timeout, S3CallTimeout
+from image_cache import (
+    cache_get_by_internal_filename,
+    cache_get_by_pattern,
+    invalidate_cache,
+    CACHE_DB_PATH,
+    CACHE_INVALIDATE_PATH,
+)
 
 # Phase 6: crash forensics — dump Python tracebacks on SIGSEGV/SIGABRT
 faulthandler.enable(file=sys.stderr, all_threads=True)
@@ -423,12 +430,14 @@ def static(path):
         abort(404)
     filename = path.split('/')[-1]
     image_db = get_image_db()
-    try:
-        with db_call_timeout(5):
-            records = image_db.get_image_record_by_internal_filename(filename)
-    except DbCallTimeout:
-        logging.error(f"DB_TIMEOUT static filename={filename}")
-        abort(503, "Database temporarily unavailable")
+    records = cache_get_by_internal_filename(filename)
+    if records is None:
+        try:
+            with db_call_timeout(5):
+                records = image_db.get_image_record_by_internal_filename(filename)
+        except DbCallTimeout:
+            logging.error(f"DB_TIMEOUT static filename={filename}")
+            abort(503, "Database temporarily unavailable")
     if len(records) < 1:
         log(f"Static record not found: {request.query.filename}")
         response.content_type = 'text/plain; charset=utf-8'
@@ -497,13 +506,15 @@ def fileget():
     """Returns the file data of the file indicated by the query parameters."""
     log(f"fileget {request.query.filename}")
     image_db = get_image_db()
-    try:
-        with trace_stage('db_lookup'):
-            with db_call_timeout(5):
-                records = image_db.get_image_record_by_internal_filename(request.query.filename)
-    except DbCallTimeout:
-        logging.error(f"DB_TIMEOUT fileget db_lookup filename={request.query.filename}")
-        abort(503, "Database temporarily unavailable")
+    with trace_stage('db_lookup'):
+        records = cache_get_by_internal_filename(request.query.filename)
+        if records is None:
+            try:
+                with db_call_timeout(5):
+                    records = image_db.get_image_record_by_internal_filename(request.query.filename)
+            except DbCallTimeout:
+                logging.error(f"DB_TIMEOUT fileget db_lookup filename={request.query.filename}")
+                abort(503, "Database temporarily unavailable")
     log("Fileget complete")
     if len(records) < 1:
         log(f"Record not found: {request.query.filename}")
@@ -677,6 +688,7 @@ def fileupload():
         print(f"Unexpected error: {ex}")
         abort(500, f'Unexpected error: {ex}')
 
+    invalidate_cache()
     log(f"Image upload complete: original filename {original_filename} mapped to {storename}")
     end_save = time.time()
     log(f"Total time: {end_save - start_save}")
@@ -719,6 +731,7 @@ def filedelete():
 
     response.content_type = 'text/plain; charset=utf-8'
     image_db.delete_image_record(storename)
+    invalidate_cache()
     return 'Ok.'
 
 
@@ -741,23 +754,32 @@ def get_image_record():
     exact = str2bool(query_params.get('exact', default='False'))
     collection = query_params.get('coll')
 
-    search_functions = {
-        'filename': lambda: image_db.get_image_record_by_original_filename(query_string, exact=exact,
-                                                                           collection=collection),
-        'path': lambda: image_db.get_image_record_by_original_path(query_string, exact=exact, collection=collection),
-        'md5': lambda: image_db.get_image_record_by_original_image_md5(query_string, collection=collection)
+    cache_columns = {
+        'filename': 'original_filename',
+        'path': 'original_path',
+        'md5': 'orig_md5',
     }
-
-    search_function = search_functions.get(search_type)
-    if not search_function:
+    cache_col = cache_columns.get(search_type)
+    if not cache_col:
         abort(400, 'Invalid search type')
 
-    try:
-        with db_call_timeout(5):
-            record_list = search_function()
-    except DbCallTimeout:
-        logging.error(f"DB_TIMEOUT getImageRecord search_type={search_type} query={query_string}")
-        abort(503, "Database temporarily unavailable")
+    # md5 search is always exact
+    cache_exact = exact if search_type != 'md5' else True
+    record_list = cache_get_by_pattern(query_string, cache_col, cache_exact, collection)
+
+    if record_list is None:
+        search_functions = {
+            'filename': lambda: image_db.get_image_record_by_original_filename(query_string, exact=exact,
+                                                                               collection=collection),
+            'path': lambda: image_db.get_image_record_by_original_path(query_string, exact=exact, collection=collection),
+            'md5': lambda: image_db.get_image_record_by_original_image_md5(query_string, collection=collection)
+        }
+        try:
+            with db_call_timeout(5):
+                record_list = search_functions[search_type]()
+        except DbCallTimeout:
+            logging.error(f"DB_TIMEOUT getImageRecord search_type={search_type} query={query_string}")
+            abort(503, "Database temporarily unavailable")
     log(f"Record list: {record_list}")
 
     if not record_list:
@@ -888,6 +910,15 @@ def debug_health():
         worker_info = {}
 
     rusage = resource.getrusage(resource.RUSAGE_SELF)
+    cache_info = {}
+    try:
+        cache_stat = os.stat(CACHE_DB_PATH)
+        cache_info['size_mb'] = round(cache_stat.st_size / 1048576, 1)
+        cache_info['age_s'] = round(time.time() - cache_stat.st_mtime, 1)
+        cache_info['stale'] = os.path.exists(CACHE_INVALIDATE_PATH)
+    except FileNotFoundError:
+        cache_info['exists'] = False
+
     info = {
         'status': 'ok',
         'pid': os.getpid(),
@@ -899,6 +930,7 @@ def debug_health():
         'worker': worker_info,
         'uptime_s': round(time.monotonic() - _server_start_time, 1),
         's3_temp_dirs': len(os.listdir('s3_temp')) if os.path.isdir('s3_temp') else 0,
+        'image_cache': cache_info,
     }
     response.content_type = 'application/json'
     return json.dumps(info)
