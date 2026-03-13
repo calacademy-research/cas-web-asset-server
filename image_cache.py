@@ -29,7 +29,8 @@ CACHE_INVALIDATE_PATH = '/tmp/image_cache.invalidate'
 
 _check_lock = threading.Lock()
 _last_check_monotonic = 0.0
-_CHECK_INTERVAL_S = 60
+_CHECK_INTERVAL_S = 10     # how often workers stat() the marker file
+_DEBOUNCE_S = 30           # wait for writes to quiesce before rebuilding
 
 
 # ── build / rebuild ────────────────────────────────────────────────
@@ -159,10 +160,16 @@ def _needs_rebuild():
     if not os.path.exists(CACHE_DB_PATH):
         return True
     try:
-        os.stat(CACHE_INVALIDATE_PATH)
-        return True
+        marker_mtime = os.stat(CACHE_INVALIDATE_PATH).st_mtime
     except FileNotFoundError:
         return False
+    # Debounce: don't rebuild while writes are still arriving.
+    # Only rebuild once the marker is older than _DEBOUNCE_S,
+    # meaning writes have quiesced.
+    age = time.time() - marker_mtime
+    if age < _DEBOUNCE_S:
+        return False  # too fresh — writes still in progress
+    return True
 
 
 def _ensure_cache():
