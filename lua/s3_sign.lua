@@ -8,6 +8,11 @@
 --   S3_SECRET_KEY
 --   S3_REGION (default: us-east-1)
 
+local endpoint = os.getenv("S3_ENDPOINT") or ""
+if endpoint == "" then
+    return ngx.exit(404)
+end
+
 local resty_string = require "resty.string"
 local resty_sha256 = require "resty.sha256"
 local bit = require "bit"
