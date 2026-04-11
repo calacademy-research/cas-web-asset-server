@@ -2,6 +2,7 @@
 Variables for s3 api set in docker-compose.yml as environment variables"""
 import os
 import shutil
+import signal
 import sys
 import tempfile
 import uuid
@@ -23,6 +24,40 @@ import threading
 import atexit
 import weakref
 import posixpath
+
+
+class S3CallTimeout(Exception):
+    """Raised when an S3 operation exceeds its hard SIGALRM timeout.
+
+    boto3's read_timeout is per-recv(), so trickle data from a stalled MinIO
+    can keep the socket alive indefinitely.  SIGALRM is the only mechanism
+    that can interrupt a blocking SSL read from the outside.
+    Requires threads=1 in uWSGI (signal delivery targets the main thread).
+    """
+
+
+@contextmanager
+def s3_call_timeout(seconds):
+    """Hard per-call timeout using SIGALRM.
+
+    Only arms the alarm when running in the main thread (threads=1 uWSGI).
+    Falls back to a no-op in non-main threads so the code is safe to run
+    in tests or with threads>1 (where boto3 read_timeout is the only guard).
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def _handler(signum, frame):
+        raise S3CallTimeout(f"S3 call exceeded {seconds}s hard timeout")
+
+    old_handler = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 class S3Connection:
@@ -50,9 +85,33 @@ class S3Connection:
         self.chunk_size = 64 * 1024
         self._s3 = None
         self._s3_lock = threading.Lock()
+        self._s3_created_at = 0
+        self._S3_CLIENT_MAX_AGE = 120  # seconds — recreate before MinIO closes idle connections
         atexit.register(self.cleanup_temp_folder)
         weakref.finalize(self, self.cleanup_temp_folder)
 
+
+    @staticmethod
+    def _close_s3_client(client):
+        """Close the underlying urllib3 connection pools to prevent CLOSE-WAIT socket leaks.
+
+        PoolManager.clear() only drops pool references without closing sockets.
+        We must call close() on each connection pool to actually shut down the
+        TCP connections, otherwise they linger in CLOSE-WAIT indefinitely.
+        """
+        try:
+            http_session = client._endpoint.http_session
+            manager = http_session._manager
+            with manager.pools.lock:
+                pools = list(manager.pools._container.values())
+            for pool in pools:
+                try:
+                    pool.close()
+                except Exception:
+                    pass
+            http_session.close()
+        except Exception as e:
+            logging.debug(f"S3 client close error (non-fatal): {e}")
 
     @staticmethod
     def not_found_client_error(e: ClientError) -> bool:
@@ -76,8 +135,8 @@ class S3Connection:
     @staticmethod
     def retry_s3_call(max_retries=5):
         """
-        Retry decorator for S3 operations with progressive backoff.
-        Gives up after max_retries attempts and returns 503.
+        Retry decorator for S3 client initialization only.
+        Retries with progressive backoff on transient errors.
         """
 
         def decorator(func):
@@ -85,37 +144,43 @@ class S3Connection:
             def wrapper(*args, **kwargs):
                 delay = 0
                 attempt = 0
+                t_op_start = time.monotonic()
                 while True:
+                    t0 = time.monotonic()
                     try:
-                        return func(*args, **kwargs)
+                        result = func(*args, **kwargs)
+                        dt = round((time.monotonic() - t0) * 1000, 1)
+                        if dt > 500:
+                            logging.info(f"S3_OP {func.__name__} ok {dt}ms attempt={attempt+1}")
+                        return result
 
                     except ClientError as e:
-                        if S3Connection.not_found_client_error(e):
-                            msg = e.response.get("Error", {}).get("Message") or "Not Found"
-                            abort(404, msg)
-
+                        dt = round((time.monotonic() - t0) * 1000, 1)
                         attempt += 1
                         if attempt >= max_retries:
+                            total_dt = round((time.monotonic() - t_op_start) * 1000, 1)
                             logging.error(
-                                f"[{func.__name__}] Failed after {attempt} attempts: {type(e).__name__}: {e}"
+                                f"S3_OP {func.__name__} FAILED {total_dt}ms after {attempt} attempts: {type(e).__name__}: {e}"
                             )
-                            abort(503, f"S3 temporarily unavailable after {attempt} retries")
+                            raise
                         logging.warning(
-                            f"[{func.__name__}] Attempt {attempt}/{max_retries} failed: {type(e).__name__}: {e}. "
+                            f"S3_OP {func.__name__} retry {dt}ms attempt={attempt}/{max_retries}: {type(e).__name__}: {e}. "
                             f"Retrying in {delay}s..."
                         )
                         time.sleep(delay)
                         delay = min(delay + 10, 60)
 
                     except (EndpointConnectionError, ConnectionClosedError, ReadTimeoutError) as e:
+                        dt = round((time.monotonic() - t0) * 1000, 1)
                         attempt += 1
                         if attempt >= max_retries:
+                            total_dt = round((time.monotonic() - t_op_start) * 1000, 1)
                             logging.error(
-                                f"[{func.__name__}] Failed after {attempt} attempts: {type(e).__name__}: {e}"
+                                f"S3_OP {func.__name__} FAILED {total_dt}ms after {attempt} attempts: {type(e).__name__}: {e}"
                             )
-                            abort(503, f"S3 temporarily unavailable after {attempt} retries")
+                            raise
                         logging.warning(
-                            f"[{func.__name__}] Attempt {attempt}/{max_retries} failed: {type(e).__name__}: {e}. "
+                            f"S3_OP {func.__name__} retry {dt}ms attempt={attempt}/{max_retries}: {type(e).__name__}: {e}. "
                             f"Retrying in {delay}s..."
                         )
                         time.sleep(delay)
@@ -124,6 +189,35 @@ class S3Connection:
             return wrapper
 
         return decorator
+
+    @staticmethod
+    def s3_error_handler(func):
+        """
+        Decorator that converts S3 exceptions to HTTP errors.
+        No retries — fail fast so the client can retry naturally.
+        """
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            t0 = time.monotonic()
+            try:
+                return func(*args, **kwargs)
+            except S3CallTimeout as e:
+                dt = round((time.monotonic() - t0) * 1000, 1)
+                logging.error(f"S3_OP {func.__name__} HARD_TIMEOUT {dt}ms: {e}")
+                abort(503, "S3 temporarily unavailable")
+            except ClientError as e:
+                dt = round((time.monotonic() - t0) * 1000, 1)
+                if S3Connection.not_found_client_error(e):
+                    logging.debug(f"S3_OP {func.__name__} 404 {dt}ms")
+                    msg = e.response.get("Error", {}).get("Message") or "Not Found"
+                    abort(404, msg)
+                logging.error(f"S3_OP {func.__name__} FAILED {dt}ms: {type(e).__name__}: {e}")
+                abort(503, "S3 temporarily unavailable")
+            except (EndpointConnectionError, ConnectionClosedError, ReadTimeoutError) as e:
+                dt = round((time.monotonic() - t0) * 1000, 1)
+                logging.error(f"S3_OP {func.__name__} FAILED {dt}ms: {type(e).__name__}: {e}")
+                abort(503, "S3 temporarily unavailable")
+        return wrapper
 
     def cleanup_temp_folder(self):
         """Remove this instance's TMP_FOLDER and stale s3_temp folders safely."""
@@ -161,51 +255,63 @@ class S3Connection:
         return p.lstrip('/')
 
 
-    @retry_s3_call()
+    def _create_s3_client(self):
+        """Create a new boto3 S3 client (no I/O, no locks)."""
+        session = boto3.session.Session()
+        return session.client(
+            's3',
+            endpoint_url=self.S3_ENDPOINT,
+            aws_access_key_id=self.S3_ACCESS_KEY,
+            aws_secret_access_key=self.S3_SECRET_KEY,
+            region_name=self.S3_REGION,
+            config=Config(
+                max_pool_connections=4,
+                retries={'max_attempts': 1, 'mode': 'standard'},
+                connect_timeout=3,
+                read_timeout=5,
+                tcp_keepalive=True,
+                signature_version='s3v4',
+                s3={'use_dualstack_endpoint': False}
+            )
+        )
+
     def get_s3(self):
-        """Lazy-initialized singleton S3 client (only if USE_S3). Thread-safe."""
+        """Lazy-initialized S3 client with periodic refresh to flush stale connections.
+
+        Recycling prevents CLOSE-WAIT socket leaks: MinIO closes idle connections
+        (sends FIN), but urllib3 never reads the TLS close_notify. Sockets accumulate
+        in CLOSE-WAIT and hang when reused. We recycle the client (and properly close
+        the old sockets) before they go stale.
+
+        IMPORTANT: The lock only protects the pointer swap. All I/O (client creation,
+        bucket validation, old client cleanup) happens outside the lock to prevent
+        thread starvation — if head_bucket or close hangs, only one thread is affected.
+        """
         if not self.S3_ENDPOINT:
             raise RuntimeError("S3 is not enabled")
-        if self._s3 is not None:
+        now = time.monotonic()
+        if self._s3 is not None and (now - self._s3_created_at) < self._S3_CLIENT_MAX_AGE:
             return self._s3
+
+        # Create new client OUTSIDE the lock (no I/O in constructor)
+        client = self._create_s3_client()
+        old_client = None
+
         with self._s3_lock:
-            if self._s3 is not None:
+            # Double-check — another thread may have already recycled
+            if self._s3 is not None and (time.monotonic() - self._s3_created_at) < self._S3_CLIENT_MAX_AGE:
+                # Another thread won the race; discard our new client
+                self._close_s3_client(client)
                 return self._s3
-            session = boto3.session.Session()
-            client = session.client(
-                's3',
-                endpoint_url=self.S3_ENDPOINT,
-                aws_access_key_id=self.S3_ACCESS_KEY,
-                aws_secret_access_key=self.S3_SECRET_KEY,
-                region_name=self.S3_REGION,
-                config=Config(
-                    max_pool_connections=64,
-                    retries={'max_attempts': 10, 'mode': 'adaptive'},
-                    connect_timeout=3,
-                    read_timeout=30,
-                    tcp_keepalive=True,
-                    signature_version='s3v4',
-                    s3={'use_dualstack_endpoint': True}
-                )
-            )
-            # Ensure bucket exists
-            try:
-                client.head_bucket(Bucket=self.S3_BUCKET)
-            except ClientError as e:
-                code = e.response['Error']['Code']
-                if code in ('404', 'NoSuchBucket'):
-                    try:
-                        client.create_bucket(Bucket=self.S3_BUCKET)
-                        time.sleep(10)
-                        client.head_bucket(Bucket=self.S3_BUCKET)
-                    except ClientError as e:
-                        logging.critical(f"Bucket {self.S3_BUCKET} does not exist and could not be created.", e)
-                        raise
-                else:
-                    logging.critical(f"Bucket {self.S3_BUCKET} does not exist and could not be created.", e)
-                    raise
+            old_client = self._s3
             self._s3 = client
-        return self._s3
+            self._s3_created_at = time.monotonic()
+
+        # All I/O happens OUTSIDE the lock
+        if old_client is not None:
+            self._close_s3_client(old_client)
+            logging.info(f"S3 client recycled (pid={os.getpid()})")
+        return client
 
     def s3_full_key(self, rel: str) -> str:
         """uses posixpath to create full key to avoid double slashes"""
@@ -213,7 +319,7 @@ class S3Connection:
         prefix = (self.S3_PREFIX or "").strip("/")
         return posixpath.join(prefix, rel) if prefix else rel
 
-    @retry_s3_call()
+    @s3_error_handler
     def storage_exists(self, rel: str) -> bool:
         """
         Check if object exists locally or in S3.
@@ -221,17 +327,28 @@ class S3Connection:
         """
         full_key = self.s3_full_key(rel)
         if self.S3_ENDPOINT:
+            key = self.s3_key(full_key)
+            tid = threading.get_ident()
+            t0 = time.monotonic()
             try:
-                self.get_s3().head_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
+                with s3_call_timeout(3):
+                    self.get_s3().head_object(Bucket=self.S3_BUCKET, Key=key)
+                dt = round((time.monotonic() - t0) * 1000, 1)
+                if dt > 500:
+                    logging.warning(f"S3_SLOW head_object SLOW tid={tid} key={key} dt={dt}ms")
                 return True
             except ClientError as e:
+                dt = round((time.monotonic() - t0) * 1000, 1)
                 if e.response['Error']['Code'] == '404':
+                    if dt > 500:
+                        logging.warning(f"S3_SLOW head_object 404 SLOW tid={tid} key={key} dt={dt}ms")
                     return False
+                logging.error(f"S3_ERR head_object tid={tid} key={key} dt={dt}ms error={e}")
                 raise
 
         return False
 
-    @retry_s3_call()
+    @s3_error_handler
     def orig_location(self, rel: str) -> str:
         """
         Validate that the original exists (S3 mode) before returning rel key/path.
@@ -240,7 +357,7 @@ class S3Connection:
             abort(404, f"Missing object: {rel}")
         return rel
 
-    @retry_s3_call()
+    @s3_error_handler
     @contextmanager
     def storage_tempfile(self, rel: str):
         """
@@ -253,12 +370,16 @@ class S3Connection:
         fd, tmp_path = tempfile.mkstemp(dir=self.TMP_FOLDER, prefix="s3dl_", suffix=ext or "")
         os.close(fd)
         try:
-            self.get_s3().download_file(self.S3_BUCKET, self.s3_key(full_key), tmp_path)
+            t0 = time.monotonic()
+            with s3_call_timeout(8):
+                self.get_s3().download_file(self.S3_BUCKET, self.s3_key(full_key), tmp_path)
+            dt = round((time.monotonic() - t0) * 1000, 1)
+            file_size = os.path.getsize(tmp_path)
+            logging.info(f"S3_DOWNLOAD key={self.s3_key(full_key)} size={file_size} bytes dt={dt}ms")
             yield tmp_path
         finally:
             self.remove_tempfile(tmp_path)
 
-    @retry_s3_call()
     def remove_tempfile(self, tmp_path: str):
         """
         removes temp-files created by the storage download with exception
@@ -270,7 +391,7 @@ class S3Connection:
             except OSError as e:
                 logging.warning(f"Could not delete {tmp_path}: {e}")
 
-    @retry_s3_call()
+    @s3_error_handler
     def storage_download(self, rel: str) -> str:
         """
         downloads from S3 to a temp file and returns the local path.
@@ -284,13 +405,14 @@ class S3Connection:
         os.close(fd)
 
         try:
-            self.get_s3().download_file(self.S3_BUCKET, self.s3_key(full_key), tmp_path)
+            with s3_call_timeout(8):
+                self.get_s3().download_file(self.S3_BUCKET, self.s3_key(full_key), tmp_path)
             return tmp_path
         except Exception:
             self.remove_tempfile(tmp_path)
             raise
 
-    @retry_s3_call()
+    @s3_error_handler
     def storage_save(self, rel: str, file_object):
         """
         Save file data either to local filesystem or S3.
@@ -302,9 +424,10 @@ class S3Connection:
         kwargs = dict(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key), Body=file_object.read())
         if mime:
             kwargs["ContentType"] = mime
-        self.get_s3().put_object(**kwargs)
+        with s3_call_timeout(8):
+            self.get_s3().put_object(**kwargs)
 
-    @retry_s3_call()
+    @s3_error_handler
     def storage_delete(self, rel: str):
         """
         Delete the object referenced by rel from local filesystem or S3.
@@ -312,11 +435,12 @@ class S3Connection:
         full_key = self.s3_full_key(rel)
 
         if self.S3_ENDPOINT:
-            self.get_s3().delete_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
+            with s3_call_timeout(3):
+                self.get_s3().delete_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
             return
         abort(404)
 
-    @retry_s3_call()
+    @s3_error_handler
     def storage_url(self, rel: str):
         """
         Generate a pre-signed URL for an S3 object if running in S3 mode. Returns None otherwise
@@ -330,7 +454,6 @@ class S3Connection:
             )
         return None
 
-    @retry_s3_call()
     def stream(self, body):
         """loads the stream by iterating through the file body by chunk size"""
         try:
@@ -339,7 +462,7 @@ class S3Connection:
         finally:
             body.close()
 
-    @retry_s3_call()
+    @s3_error_handler
     def s3_stream_response(self, rel, downloadname=None, filename_for_ct=None):
         """Return a Bottle response for an S3 object.
 
@@ -370,8 +493,10 @@ class S3Connection:
 
         # --- Slow path: stream through Python (original behavior) ---
         s3 = self.get_s3()
-        head = s3.head_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
-        obj = s3.get_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
+        with s3_call_timeout(3):
+            head = s3.head_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
+        with s3_call_timeout(3):
+            obj = s3.get_object(Bucket=self.S3_BUCKET, Key=self.s3_key(full_key))
         body = obj["Body"]  # botocore.response.StreamingBody
 
         mime, _ = guess_type(filename_for_ct or full_key)
