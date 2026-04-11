@@ -249,6 +249,7 @@ class S3Connection:
         """
         full_key = self.s3_full_key(rel)
         _, ext = os.path.splitext(rel)
+        os.makedirs(self.TMP_FOLDER, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(dir=self.TMP_FOLDER, prefix="s3dl_", suffix=ext or "")
         os.close(fd)
         try:
@@ -278,6 +279,7 @@ class S3Connection:
         """
         full_key = self.s3_full_key(rel)
         _, ext = os.path.splitext(rel)
+        os.makedirs(self.TMP_FOLDER, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(dir=self.TMP_FOLDER, prefix="s3dl_", suffix=ext or "")
         os.close(fd)
 
