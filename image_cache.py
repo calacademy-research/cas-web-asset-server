@@ -97,10 +97,10 @@ def _build_cache_db():
         'CREATE INDEX idx_cache_internal_filename ON images(internal_filename)'
     )
     conn.execute(
-        'CREATE INDEX idx_cache_original_filename ON images(original_filename)'
+        'CREATE INDEX idx_cache_original_filename ON images(original_filename COLLATE NOCASE)'
     )
     conn.execute(
-        'CREATE INDEX idx_cache_original_path ON images(original_path)'
+        'CREATE INDEX idx_cache_original_path ON images(original_path COLLATE NOCASE)'
     )
     conn.execute(
         'CREATE INDEX idx_cache_orig_md5 ON images(orig_md5)'
@@ -260,10 +260,10 @@ def cache_get_by_pattern(pattern, column, exact, collection):
         conn = _get_conn()
         try:
             if exact:
-                sql = f'SELECT * FROM images WHERE {column} = ?'
+                sql = f'SELECT * FROM images WHERE {column} = ? COLLATE NOCASE'
                 params = [pattern]
             else:
-                sql = f'SELECT * FROM images WHERE {column} LIKE ?'
+                sql = f'SELECT * FROM images WHERE {column} LIKE ? COLLATE NOCASE'
                 params = [f'%{pattern}%']
 
             if collection is not None:
