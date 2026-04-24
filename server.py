@@ -431,7 +431,7 @@ def static(path):
     filename = path.split('/')[-1]
     image_db = get_image_db()
     records = cache_get_by_internal_filename(filename)
-    if records is None:
+    if records is None or not records:
         try:
             with db_call_timeout(5):
                 records = image_db.get_image_record_by_internal_filename(filename)
@@ -508,7 +508,7 @@ def fileget():
     image_db = get_image_db()
     with trace_stage('db_lookup'):
         records = cache_get_by_internal_filename(request.query.filename)
-        if records is None:
+        if records is None or not records:
             try:
                 with db_call_timeout(5):
                     records = image_db.get_image_record_by_internal_filename(request.query.filename)
