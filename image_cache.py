@@ -31,6 +31,7 @@ _check_lock = threading.Lock()
 _last_check_monotonic = 0.0
 _CHECK_INTERVAL_S = 10     # how often workers stat() the marker file
 _DEBOUNCE_S = 30           # wait for writes to quiesce before rebuilding
+_MAX_STALENESS_S = 300     # ceiling: rebuild even if marker is still fresh
 
 
 # ── build / rebuild ────────────────────────────────────────────────
@@ -163,6 +164,11 @@ def _needs_rebuild():
         marker_mtime = os.stat(CACHE_INVALIDATE_PATH).st_mtime
     except FileNotFoundError:
         return False
+    # Force rebuild if cache exceeds ceiling — otherwise a steady write
+    # stream keeps the marker fresh and starves rebuilds indefinitely.
+    cache_mtime = os.stat(CACHE_DB_PATH).st_mtime
+    if time.time() - cache_mtime >= _MAX_STALENESS_S:
+        return True
     # Debounce: don't rebuild while writes are still arriving.
     # Only rebuild once the marker is older than _DEBOUNCE_S,
     # meaning writes have quiesced.
