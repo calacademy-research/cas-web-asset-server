@@ -11,35 +11,15 @@ RUN apt-get update && apt-get install -y \
     dnsutils \
     && apt-get clean
 
+# NOTE: the Nginx Ultimate Bad Bot Blocker was removed 2026-07-09 (retired in favour
+# of CrowdSec http-bad-user-agent + cas/ai-crawler + the CAS $is_bot map in nginx.conf).
 # Copy your main nginx.conf into the container
 COPY nginx.conf /etc/nginx/
 COPY views/robots.txt /srv/app/views/robots.txt
 
-# Download and install the Nginx Ultimate Bad Bot Blocker 'install-ngxblocker' script
-RUN wget https://raw.githubusercontent.com/mitchellkrogza/nginx-ultimate-bad-bot-blocker/master/install-ngxblocker \
-    -O /usr/local/sbin/install-ngxblocker \
- && chmod +x /usr/local/sbin/install-ngxblocker
-
-# Run install-ngxblocker and update botlist, telling it to place files in conf.d and bots.d
-RUN /usr/local/sbin/install-ngxblocker -x -c /etc/nginx/conf.d -b /etc/nginx/bots.d
-
-# Download and install the setup/update scripts
-RUN wget https://raw.githubusercontent.com/mitchellkrogza/nginx-ultimate-bad-bot-blocker/master/setup-ngxblocker \
-    -O /usr/local/sbin/setup-ngxblocker \
- && wget https://raw.githubusercontent.com/mitchellkrogza/nginx-ultimate-bad-bot-blocker/master/update-ngxblocker \
-    -O /usr/local/sbin/update-ngxblocker \
- && chmod +x /usr/local/sbin/setup-ngxblocker \
- && chmod +x /usr/local/sbin/update-ngxblocker
-
-# run any updates to botblocker
-RUN /usr/local/sbin/update-ngxblocker -c /etc/nginx/conf.d -b /etc/nginx/bots.d
-
 RUN /usr/local/openresty/bin/opm get openresty/lua-resty-string
 
 COPY /lua/s3_sign.lua /usr/local/openresty/nginx/lua/s3_sign.lua
-
-# (Optional) Add a crontab job to periodically update the blocker
-RUN echo "00 22 * * * /usr/local/sbin/update-ngxblocker -e youremail@email.org" >> /etc/crontab
 
 # CrowdSec AppSec: lua HTTP client + error pages (403/503 were missing -> 404)
 RUN /usr/local/openresty/bin/opm get ledgetech/lua-resty-http
