@@ -42,3 +42,5 @@ settings.development.py
 .idea
 venv
 app.log
+
+.env

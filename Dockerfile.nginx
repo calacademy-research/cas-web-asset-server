@@ -40,3 +40,7 @@ COPY /lua/s3_sign.lua /usr/local/openresty/nginx/lua/s3_sign.lua
 
 # (Optional) Add a crontab job to periodically update the blocker
 RUN echo "00 22 * * * /usr/local/sbin/update-ngxblocker -e youremail@email.org" >> /etc/crontab
+
+# CrowdSec AppSec: lua HTTP client + error pages (403/503 were missing -> 404)
+RUN /usr/local/openresty/bin/opm get ledgetech/lua-resty-http
+COPY views/403.html views/503.html /srv/app/views/
