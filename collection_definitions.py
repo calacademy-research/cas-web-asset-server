@@ -14,6 +14,7 @@ COLLECTION_DIRS = {
     'Invertebrate Zoology': 'iz',
     'IZ': 'iz',
     'casiz': 'iz',
-    'Botany_PIC': 'PIC_upload'
+    'Botany_PIC': 'PIC_upload',
+    'casherp': 'herp'
 }
 
