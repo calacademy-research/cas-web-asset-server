@@ -1,36 +1,59 @@
-# disallowing all bots and webcrawlers
+# California Academy of Sciences - collections image service
+# Full policy for automated and bulk clients: /access-policy.txt
+#
+# Default is no automated crawling. Specimen occurrence records and images are
+# published to GBIF as Darwin Core Archives - complete, versioned and citable -
+# which is the supported route for bulk access:
+#   https://www.gbif.org/publisher/search?q=california%20academy
 
 User-agent: *
 Disallow: /
 
-## exceptions
-
-# www.cch2.org
-User-agent: *www.cch2.org*
+# --- Permitted ---------------------------------------------------------------
+# The GBIF image cache (Thumbor), operated from DTU Denmark, 130.225.43.0/24.
+# This is how CAS specimen images reach gbif.org, so it must stay allowed here
+# and in the nginx exemptions (geo $limit_bot and geo $limited).
+# Matched on the bare product token so it survives version bumps: an earlier
+# revision of this file named "Thumbor/7.4.7" while the live client was 7.7.7.
+User-agent: Thumbor
 Allow: /
 
-# bryophyteportal.org
-User-agent: *bryophyteportal.org*
-Allow: /
+# --- Explicitly not permitted ------------------------------------------------
+# Covered by "User-agent: *" above; named because /access-policy.txt states that
+# AI and model-training crawling is not permitted without prior written
+# arrangement, and points here for the specifics.
 
-# lichenportal.org
-User-agent: *lichenportal.org*
-Allow: /
+User-agent: GPTBot
+Disallow: /
 
-# library.big‑bee.net
-User-agent: *library.big‑bee.net*
-Allow: /
+User-agent: ClaudeBot
+Disallow: /
 
-# GBIF API crawler
-User-agent: *api.gbif.org*
-Allow: /
+User-agent: CCBot
+Disallow: /
 
-# GBIF scientific‑collections
-User-agent: *scientific‑collections.gbif.org*
-Allow: /
+User-agent: Google-Extended
+Disallow: /
 
-# Thumbor v7.4.7 from Danmarks Tekniske Universitet
-User-agent: *Thumbor/7.4.7*
-Allow: /
+User-agent: Bytespider
+Disallow: /
 
+User-agent: meta-externalagent
+Disallow: /
 
+User-agent: meta-webindexer
+Disallow: /
+
+# --- Note on what is deliberately NOT listed here ----------------------------
+# The partner portals that DISPLAY our images - cch2.org, bryophyteportal.org,
+# lichenportal.org, library.big-bee.net - and the GBIF web APIs are not crawlers.
+# Those requests come from end-user browsers and are authorised by the CORS
+# origin allow-list in nginx, not by this file.
+#
+# Revisions before 2026-08-06 carried "User-agent: *api.gbif.org*"-style entries
+# for them. None could ever match: a robots.txt User-agent line takes a product
+# token, not a domain or a glob (only a bare "*" is special), two of the entries
+# also contained a U+2011 non-breaking hyphen instead of "-", and the Thumbor
+# entry named a version that was no longer in use. The net effect was a file
+# that appeared to grant six exemptions while granting none. They are removed
+# rather than left looking effective.
